@@ -1,4 +1,6 @@
-//! Tokenizer for the Scheme interpreter.
+//! Tokenizer for the Scheme reader.
+//!
+//! Forked from s1/src/tokenizer.rs at bc6f118; unchanged apart from paths.
 //!
 //! Converts the characters of a port into tokens following R7RS's lexical
 //! syntax (R7RS section 7.1.1): identifiers including `|...|` forms, numbers
@@ -11,7 +13,7 @@
 //! tokenizer for the next datum.
 
 use crate::io::PortKind;
-use crate::number_syntax::{NumberSyntax, parse_number};
+use crate::reader::number_syntax::{NumberSyntax, parse_number};
 
 /// Represents a lexical token in Scheme source code.
 #[derive(Debug, Clone, PartialEq)]

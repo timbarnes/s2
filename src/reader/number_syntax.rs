@@ -1,7 +1,10 @@
 //! R7RS numeric literal syntax (R7RS section 7.1.1), shared by the reader and
 //! by `string->number`.
 //!
-//! s1's numbers are exact integers (`BigInt`), exact rationals and flonums.
+//! Forked from s1/src/number_syntax.rs at bc6f118, unchanged.
+//!
+//! The syntax gives exact integers (`BigInt`), exact rationals and flonums;
+//! the heap stores integers that fit as fixnums (`Heap::integer`).
 //! Complex number syntax such as `1+2i` is recognised as a number but
 //! reported as unsupported rather than being read as a symbol.
 
@@ -37,7 +40,7 @@ pub enum NumberSyntax {
     NotANumber,
     /// The number.
     Value(Number),
-    /// Number syntax that s1 cannot turn into a value; the message says why.
+    /// Number syntax that cannot be turned into a value; the message says why.
     Error(String),
 }
 

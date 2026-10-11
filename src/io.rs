@@ -1,7 +1,8 @@
 //! The low-level side of ports: [`PortKind`], character input with
 //! push-back, and the [`FileTable`] of open output files.
 //!
-//! The Scheme port procedures that use these are in `ports`.
+//! Forked from s1/src/io.rs at bc6f118, unchanged. The Scheme port
+//! procedures that use these come in P6.
 
 use rustc_hash::FxHashMap as HashMap;
 use std::fs::File;

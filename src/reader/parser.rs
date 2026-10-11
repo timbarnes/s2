@@ -1,27 +1,25 @@
 //! Parser for Scheme s-expressions.
 //!
-//! Turns the tokens of a `Tokenizer` into unevaluated s-expressions on the GC
-//! heap, one datum per `parse` call. Besides lists, vectors and the quote
-//! abbreviations it handles `#;` datum comments and `#n=` / `#n#` datum
-//! labels, which may make a datum refer to itself.
+//! Forked from s1/src/parser.rs at bc6f118, adapted to build `Value`s.
+//!
+//! Turns the tokens of a `Tokenizer` into data on the heap, one datum per
+//! `parse` call. Besides lists, vectors and the quote abbreviations it
+//! handles `#;` datum comments and `#n=` / `#n#` datum labels, which may make
+//! a datum refer to itself.
 //!
 //! Errors come in two kinds. Structural ones (an unexpected `)`, a list left
 //! open at end of input) stop parsing at once. Errors in a complete token
-//! (an unknown character name, a bad escape, `1/2` or `#u8(...)` whose types
-//! s1 doesn't have yet) are remembered while the rest of the top-level datum
-//! is read, then reported. That leaves the port positioned after the datum,
-//! so a bad literal deep in a list doesn't make the reader misread the rest
-//! of the list as new top-level forms.
+//! (an unknown character name, a bad escape, `1/0`, a bytevector element
+//! out of range) are remembered while the rest of the top-level datum is
+//! read, then reported. That leaves the port positioned after the datum, so
+//! a bad literal deep in a list doesn't make the reader misread the rest of
+//! the list as new top-level forms.
 
-use crate::gc::{
-    GcHeap, GcRef, SchemeValue, get_symbol, new_bool, new_bytevector, new_char, new_float, new_int,
-    new_pair, new_rational, new_string, new_vector,
-};
-use crate::{gc_value, gc_value_mut};
-use num_traits::ToPrimitive;
+use crate::heap::{GcRef, Heap, Obj};
 use crate::io::PortKind;
-use crate::number_syntax::{Number, NumberSyntax, parse_number};
-use crate::tokenizer::{Token, Tokenizer};
+use crate::reader::number_syntax::{Number, NumberSyntax, parse_number};
+use crate::reader::tokenizer::{Token, Tokenizer};
+use crate::value::Value;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 /// Why `parse` returned no datum.
@@ -34,7 +32,7 @@ pub enum ParseError {
 }
 
 /// Parse a single datum from `port_ref`.
-pub fn parse(heap: &mut GcHeap, port_ref: &mut PortKind) -> Result<GcRef, ParseError> {
+pub fn parse(heap: &mut Heap, port_ref: &mut PortKind) -> Result<Value, ParseError> {
     let mut reader = Reader {
         tokens: Tokenizer::new(port_ref),
         heap,
@@ -54,9 +52,9 @@ struct Reader<'a, 'b> {
     /// The token source.
     tokens: Tokenizer<'a>,
     /// Where the datum is built.
-    heap: &'b mut GcHeap,
+    heap: &'b mut Heap,
     /// Datum labels defined so far in this top-level datum.
-    labels: HashMap<u64, GcRef>,
+    labels: HashMap<u64, Value>,
     /// The first error found in a complete token; see the module docs.
     deferred: Option<String>,
 }
@@ -64,9 +62,9 @@ struct Reader<'a, 'b> {
 impl Reader<'_, '_> {
     /// Remember `msg` (if it's the first error) and stand in a placeholder
     /// value so reading can continue to the end of the datum.
-    fn defer(&mut self, msg: String) -> GcRef {
+    fn defer(&mut self, msg: String) -> Value {
         self.deferred.get_or_insert(msg);
-        self.heap.unspecified()
+        Value::UNSPECIFIED
     }
 
     /// The next token that can start a datum, after skipping `#;` comments.
@@ -84,44 +82,44 @@ impl Reader<'_, '_> {
     }
 
     /// The datum that starts with `token`.
-    fn datum(&mut self, token: Token) -> Result<GcRef, ParseError> {
+    fn datum(&mut self, token: Token) -> Result<Value, ParseError> {
         Ok(match token {
             Token::Eof => return Err(ParseError::Eof),
             Token::Number(s) => match parse_number(&s, 10) {
-                NumberSyntax::Value(Number::Int(i)) => new_int(self.heap, i),
-                NumberSyntax::Value(Number::Float(f)) => new_float(self.heap, f),
-                NumberSyntax::Value(Number::Rational(r)) => new_rational(self.heap, r),
+                NumberSyntax::Value(Number::Int(i)) => self.heap.integer(i),
+                NumberSyntax::Value(Number::Float(f)) => Value::flonum(f),
+                NumberSyntax::Value(Number::Rational(r)) => self.heap.rational(r),
                 NumberSyntax::Error(msg) => self.defer(msg),
                 NumberSyntax::NotANumber => self.defer(format!("invalid number {}", s)),
             },
-            Token::String(s) => new_string(self.heap, &s),
-            Token::Boolean(b) => new_bool(self.heap, b),
-            Token::Character(c) => new_char(self.heap, c),
-            Token::Symbol(s) | Token::BarSymbol(s) => get_symbol(self.heap, &s),
+            Token::String(s) => self.heap.string(&s),
+            Token::Boolean(b) => Value::bool(b),
+            Token::Character(c) => Value::char(c),
+            Token::Symbol(s) | Token::BarSymbol(s) => self.heap.intern(&s),
             Token::LeftParen => self.list(Token::RightParen)?,
             Token::LeftBracket => {
                 let elems = self.sequence(Token::RightBracket, "vector")?;
-                new_vector(self.heap, elems)
+                self.heap.vector(elems)
             }
             Token::HashParen => {
                 let elems = self.sequence(Token::RightParen, "vector")?;
-                new_vector(self.heap, elems)
+                self.heap.vector(elems)
             }
             Token::ByteVectorStart => {
                 let elems = self.sequence(Token::RightParen, "bytevector")?;
                 let mut bytes = Vec::with_capacity(elems.len());
                 for e in elems {
-                    match gc_value!(e) {
-                        SchemeValue::Int(i) if i.to_u8().is_some() => bytes.push(i.to_u8().unwrap()),
-                        _ => {
+                    match e.as_fixnum().and_then(|n| u8::try_from(n).ok()) {
+                        Some(b) => bytes.push(b),
+                        None => {
                             return Ok(self.defer(format!(
                                 "bytevector elements must be exact integers 0-255, not {}",
-                                crate::printer::print_value(&e)
+                                crate::printer::print_value(e)
                             )));
                         }
                     }
                 }
-                new_bytevector(self.heap, bytes)
+                self.heap.bytevector(bytes)
             }
             Token::Quote => self.abbreviation("quote")?,
             Token::QuasiQuote => self.abbreviation("quasiquote")?,
@@ -144,17 +142,15 @@ impl Reader<'_, '_> {
     }
 
     /// `'x` and friends: `(name x)`.
-    fn abbreviation(&mut self, name: &str) -> Result<GcRef, ParseError> {
+    fn abbreviation(&mut self, name: &str) -> Result<Value, ParseError> {
         let token = self.next_datum_token()?;
         let quoted = self.datum(token)?;
-        let sym = get_symbol(self.heap, name);
-        let nil = self.heap.nil_s();
-        let tail = new_pair(self.heap, quoted, nil);
-        Ok(new_pair(self.heap, sym, tail))
+        let sym = self.heap.intern(name);
+        Ok(self.heap.list(vec![sym, quoted]))
     }
 
     /// The elements of a vector or bytevector, up to `close`.
-    fn sequence(&mut self, close: Token, what: &str) -> Result<Vec<GcRef>, ParseError> {
+    fn sequence(&mut self, close: Token, what: &str) -> Result<Vec<Value>, ParseError> {
         let mut elems = Vec::new();
         loop {
             match self.next_datum_token()? {
@@ -168,9 +164,9 @@ impl Reader<'_, '_> {
     }
 
     /// A list after its opening parenthesis, possibly dotted.
-    fn list(&mut self, close: Token) -> Result<GcRef, ParseError> {
+    fn list(&mut self, close: Token) -> Result<Value, ParseError> {
         let mut elems = Vec::new();
-        let mut tail = self.heap.nil_s();
+        let mut tail = Value::NIL;
         loop {
             match self.next_datum_token()? {
                 t if t == close => break,
@@ -191,20 +187,19 @@ impl Reader<'_, '_> {
             }
         }
         for elem in elems.into_iter().rev() {
-            tail = new_pair(self.heap, elem, tail);
+            tail = self.heap.cons(elem, tail);
         }
         Ok(tail)
     }
 
     /// `#n=datum`. References to `#n#` inside the datum are read as a
     /// placeholder, which is then replaced by the datum itself.
-    fn labelled(&mut self, n: u64) -> Result<GcRef, ParseError> {
-        let nil = self.heap.nil_s();
-        let placeholder = new_pair(self.heap, nil, nil);
+    fn labelled(&mut self, n: u64) -> Result<Value, ParseError> {
+        let placeholder = self.heap.cons(Value::NIL, Value::NIL);
         self.labels.insert(n, placeholder);
         let token = self.next_datum_token()?;
         let datum = self.datum(token)?;
-        if datum == placeholder {
+        if datum.eq(placeholder) {
             return Ok(self.defer(format!("datum label #{}= refers only to itself", n)));
         }
         self.labels.insert(n, datum);
@@ -216,31 +211,26 @@ impl Reader<'_, '_> {
 /// Replace every reference to `from` inside the pairs and vectors reachable
 /// from `root` with `to`. The structure may already be cyclic, so each
 /// object is visited once.
-fn replace_refs(root: GcRef, from: GcRef, to: GcRef) {
-    let mut seen = HashSet::default();
+fn replace_refs(root: Value, from: Value, to: Value) {
+    let mut seen: HashSet<GcRef> = HashSet::default();
     let mut work = vec![root];
-    let swap = |slot: &mut GcRef| {
-        if *slot == from {
-            *slot = to;
+    let swap = |slot: &std::cell::Cell<Value>| {
+        if slot.get().eq(from) {
+            slot.set(to);
         }
+        slot.get()
     };
-    while let Some(obj) = work.pop() {
-        if !seen.insert(obj) {
+    while let Some(v) = work.pop() {
+        let Some(r) = v.as_ref() else { continue };
+        if !seen.insert(r) {
             continue;
         }
-        match gc_value_mut!(obj) {
-            SchemeValue::Pair(car, cdr) => {
-                swap(car);
-                swap(cdr);
-                work.push(*car);
-                work.push(*cdr);
+        match &r.get().kind {
+            Obj::Pair { car, cdr } => {
+                work.push(swap(car));
+                work.push(swap(cdr));
             }
-            SchemeValue::Vector(elems) => {
-                for elem in elems.iter_mut() {
-                    swap(elem);
-                    work.push(*elem);
-                }
-            }
+            Obj::Vector(elems) => work.extend(elems.iter().map(swap)),
             _ => {}
         }
     }
@@ -248,284 +238,71 @@ fn replace_refs(root: GcRef, from: GcRef, to: GcRef) {
 
 #[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
+    use crate::printer::print_value;
 
-    #[test]
-    fn parse_number() {
-        use crate::gc::SchemeValue;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("42");
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            SchemeValue::Int(i) => assert_eq!(i.to_string(), "42"),
-            _ => panic!(
-                "Expected integer, got {}",
-                crate::printer::print_value(&expr)
-            ),
-        }
-    }
-
-    #[test]
-    fn parse_symbol() {
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("hello");
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            crate::gc::SchemeValue::Symbol(s) => assert_eq!(s, "hello"),
-            _ => panic!("Expected symbol, got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_string() {
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("\"hello world\"");
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            crate::gc::SchemeValue::Str(s) => assert_eq!(s, "hello world"),
-            _ => panic!("Expected string, got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_empty_list() {
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("()");
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            crate::gc::SchemeValue::Nil => (),
-            _ => panic!("Expected (), got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_list() {
-        use crate::gc::SchemeValue;
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut str_port = crate::io::new_string_port_input("(1 2 3)");
-        let expr = parse(ec.heap, &mut str_port).unwrap();
-
-        match &ec.heap.get_value(expr) {
-            SchemeValue::Pair(car, cdr) => {
-                match &ec.heap.get_value(*car) {
-                    SchemeValue::Int(i) => assert_eq!(i.to_string(), "1"),
-                    _ => panic!("Expected integer 1, got {}", print_value(car)),
-                }
-                match &ec.heap.get_value(*cdr) {
-                    SchemeValue::Pair(car2, cdr2) => {
-                        match &ec.heap.get_value(*car2) {
-                            crate::gc::SchemeValue::Int(i) => assert_eq!(i.to_string(), "2"),
-                            _ => {
-                                panic!("Expected integer 2, got {}", print_value(car2))
-                            }
-                        }
-                        match &ec.heap.get_value(*cdr2) {
-                            crate::gc::SchemeValue::Pair(car3, cdr3) => {
-                                match &ec.heap.get_value(*car3) {
-                                    crate::gc::SchemeValue::Int(i) => {
-                                        assert_eq!(i.to_string(), "3")
-                                    }
-                                    _ => {
-                                        panic!("Expected integer 3, got {}", print_value(car3))
-                                    }
-                                }
-                                match &ec.heap.get_value(*cdr3) {
-                                    SchemeValue::Nil => (),
-                                    _ => panic!("Expected nil, got {}", print_value(cdr3)),
-                                }
-                            }
-                            _ => panic!("Expected pair, got {}", print_value(cdr2)),
-                        }
-                    }
-                    _ => panic!("Expected pair, got {}", print_value(cdr)),
-                }
-            }
-            _ => panic!("Expected pair, got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_booleans() {
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("#t #f");
-
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            crate::gc::SchemeValue::Bool(b) => assert_eq!(*b, true),
-            _ => panic!("Expected true, got {}", print_value(&expr)),
-        }
-
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            crate::gc::SchemeValue::Bool(b) => assert_eq!(*b, false),
-            _ => panic!("Expected false, got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_character() {
-        use crate::gc::SchemeValue;
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("#\\a #\\space");
-
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            SchemeValue::Char(c) => assert_eq!(*c, 'a'),
-            _ => panic!("Expected character 'a', got {}", print_value(&expr)),
-        }
-
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            SchemeValue::Char(c) => assert_eq!(*c, ' '),
-            _ => panic!("Expected character ' ', got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_quoted() {
-        use crate::gc::SchemeValue;
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("'hello");
-        let expr = parse(ec.heap, &mut port).unwrap();
-
-        match &ec.heap.get_value(expr) {
-            SchemeValue::Pair(quote_sym, quoted_expr) => {
-                match &ec.heap.get_value(*quote_sym) {
-                    SchemeValue::Symbol(s) => assert_eq!(s, "quote"),
-                    _ => panic!("Expected symbol 'quote', got {}", print_value(quote_sym)),
-                }
-                match &ec.heap.get_value(*quoted_expr) {
-                    SchemeValue::Pair(hello_sym, nil) => {
-                        match &ec.heap.get_value(*hello_sym) {
-                            SchemeValue::Symbol(s) => assert_eq!(s, "hello"),
-                            _ => panic!("Expected symbol 'hello', got {}", print_value(hello_sym)),
-                        }
-                        match &ec.heap.get_value(*nil) {
-                            SchemeValue::Nil => (),
-                            _ => panic!("Expected nil, got {}", print_value(nil)),
-                        }
-                    }
-                    _ => panic!("Expected pair, got {}", print_value(quoted_expr)),
-                }
-            }
-            _ => panic!("Expected pair, got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_dotted_pair() {
-        use crate::gc::SchemeValue;
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("(1 . 2)");
-        let expr = parse(ec.heap, &mut port).unwrap();
-
-        match &ec.heap.get_value(expr) {
-            SchemeValue::Pair(car, cdr) => {
-                match &ec.heap.get_value(*car) {
-                    SchemeValue::Int(i) => assert_eq!(i.to_string(), "1"),
-                    _ => panic!("Expected integer 1, got {}", print_value(car)),
-                }
-                match &ec.heap.get_value(*cdr) {
-                    SchemeValue::Int(i) => assert_eq!(i.to_string(), "2"),
-                    _ => panic!("Expected integer 2, got {}", print_value(cdr)),
-                }
-            }
-            _ => panic!("Expected pair, got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_vector() {
-        use crate::gc::SchemeValue;
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("#(1 2 3)");
-        let expr = parse(ec.heap, &mut port).unwrap();
-
-        match &ec.heap.get_value(expr) {
-            SchemeValue::Vector(v) => {
-                assert_eq!(v.len(), 3);
-                match &ec.heap.get_value(v[0]) {
-                    SchemeValue::Int(i) => assert_eq!(i.to_string(), "1"),
-                    _ => panic!("Expected integer 1, got {}", print_value(&v[0])),
-                }
-                match &ec.heap.get_value(v[1]) {
-                    SchemeValue::Int(i) => assert_eq!(i.to_string(), "2"),
-                    _ => panic!("Expected integer 2, got {}", print_value(&v[1])),
-                }
-                match &ec.heap.get_value(v[2]) {
-                    SchemeValue::Int(i) => assert_eq!(i.to_string(), "3"),
-                    _ => panic!("Expected integer 3, got {}", print_value(&v[2])),
-                }
-            }
-            _ => panic!("Expected vector, got {}", print_value(&expr)),
-        }
-    }
-
-    #[test]
-    fn parse_float() {
-        use crate::gc::SchemeValue;
-        use crate::printer::print_value;
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("3.14");
-        let expr = parse(ec.heap, &mut port).unwrap();
-        match &ec.heap.get_value(expr) {
-            SchemeValue::Float(f) => assert_eq!(*f, 3.14),
-            _ => panic!("Expected float, got {}", print_value(&expr)),
-        }
-    }
-
+    /// Read every datum in `s`, each written back with `write`.
     fn read_all(s: &str) -> Vec<Result<String, ParseError>> {
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
+        let mut heap = Heap::new();
         let mut port = crate::io::new_string_port_input(s);
         let mut out = Vec::new();
         loop {
-            match parse(ec.heap, &mut port) {
+            match parse(&mut heap, &mut port) {
                 Err(ParseError::Eof) => return out,
-                r => out.push(r.map(|v| crate::printer::print_value(&v))),
+                r => out.push(r.map(print_value)),
             }
         }
     }
 
+    fn read_ok(s: &str) -> Vec<String> {
+        read_all(s).into_iter().map(|r| r.unwrap()).collect()
+    }
+
     #[test]
-    fn parse_datum_comments() {
+    fn parse_atoms() {
         assert_eq!(
-            read_all("(1 #;(2 3) 4) #;5 6 (#;7)"),
-            vec![Ok("(1 4)".to_string()), Ok("6".to_string()), Ok("()".to_string())]
+            read_ok(r#"42 hello "hello world" () #t #f #\a #\space 3.14"#),
+            ["42", "hello", "\"hello world\"", "()", "#t", "#f", "#\\a", "#\\space", "3.14"]
         );
     }
 
     #[test]
-    fn parse_datum_labels() {
-        let mut ev = crate::eval::RunTimeStruct::new();
-        let ec = crate::eval::RunTime::from_eval(&mut ev);
-        let mut port = crate::io::new_string_port_input("#0=(a b . #0#)");
-        let expr = parse(ec.heap, &mut port).unwrap();
-        let third = crate::gc::cdr(crate::gc::cdr(expr).unwrap()).unwrap();
-        assert!(std::ptr::eq(third, expr), "the tail refers back to the list");
+    fn parse_number_kinds() {
+        let mut heap = Heap::new();
+        let mut port = crate::io::new_string_port_input("42 3.5 1/2 4/2 123456789012345678901234567890");
+        let mut next = || parse(&mut heap, &mut port).unwrap();
+        assert_eq!(next().as_fixnum(), Some(42));
+        assert_eq!(next().as_flonum(), Some(3.5));
+        assert!(matches!(next().as_obj().map(|o| &o.kind), Some(Obj::Rational(_))));
+        assert_eq!(next().as_fixnum(), Some(2), "4/2 reads as the integer 2");
+        assert!(matches!(next().as_obj().map(|o| &o.kind), Some(Obj::BigInt(_))));
+    }
 
-        assert_eq!(read_all("(#1=(x) #1#)"), vec![Ok("((x) (x))".to_string())]);
+    #[test]
+    fn parse_lists_and_vectors() {
+        assert_eq!(
+            read_ok("(1 2 3) (1 . 2) (1 2 . 3) #(1 2 3) [a b] #u8(0 255) 'hello"),
+            ["(1 2 3)", "(1 . 2)", "(1 2 . 3)", "#(1 2 3)", "#(a b)", "#u8(0 255)", "(quote hello)"]
+        );
+    }
+
+    #[test]
+    fn parse_datum_comments() {
+        assert_eq!(read_ok("(1 #;(2 3) 4) #;5 6 (#;7)"), ["(1 4)", "6", "()"]);
+    }
+
+    #[test]
+    fn parse_datum_labels() {
+        let mut heap = Heap::new();
+        let mut port = crate::io::new_string_port_input("#0=(a b . #0#)");
+        let expr = parse(&mut heap, &mut port).unwrap();
+        let cdr = |v: Value| match &v.as_obj().unwrap().kind {
+            Obj::Pair { cdr, .. } => cdr.get(),
+            _ => panic!("not a pair"),
+        };
+        assert!(cdr(cdr(expr)).eq(expr), "the tail refers back to the list");
+
+        assert_eq!(read_ok("(#1=(x) #1#)"), ["((x) (x))"]);
         assert!(matches!(read_all("#2#")[..], [Err(ParseError::Syntax(_))]));
     }
 
@@ -555,11 +332,50 @@ mod tests {
 
     #[test]
     fn parse_nil_and_bar_symbols() {
-        // nil is an ordinary symbol (s1-core.scm binds it to '() as a variable).
-        assert_eq!(read_all("nil |nil| |a b|"), vec![
-            Ok("nil".to_string()),
-            Ok("nil".to_string()),
-            Ok("|a b|".to_string()),
-        ]);
+        assert_eq!(read_ok("nil |nil| |a b|"), ["nil", "nil", "|a b|"]);
+    }
+
+    #[test]
+    fn structural_errors() {
+        assert!(matches!(read_all(")")[..], [Err(ParseError::Syntax(_)), ..]));
+        assert!(matches!(read_all("(1 2")[..], [Err(ParseError::Syntax(_))]));
+    }
+
+    /// The P0 exit test: `write` of what was read gives back the text, for
+    /// every lexical form the reader handles. Pairs are (input, expected)
+    /// where the written form is canonical rather than identical.
+    #[test]
+    fn round_trip() {
+        let same = [
+            "(a b c)", "(a . b)", "(a b . c)", "#(1 \"two\" #\\3)", "#u8(1 2 255)", "#u8()",
+            "\"a\\nb\\t\\\"q\\\" \\\\\"", "#\\newline", "#\\λ", "|a b|", "||", "abc->def",
+            "1/2", "-3/4", "-0.0", "+inf.0", "-inf.0", "+nan.0", "1.0e+21", "123456789012345678901234567890",
+            "-1152921504606846976", "1152921504606846976", "#t", "#f", "()", "#()",
+            "#0=(a . #0#)", "#0=#(1 #0#)", "((nested (lists)) #(in #(vectors)))",
+        ];
+        for text in same {
+            assert_eq!(read_ok(text), [text], "round trip of {}", text);
+        }
+        let canonical = [
+            ("'x", "(quote x)"),
+            ("`(a ,b ,@c)", "(quasiquote (a (unquote b) (unquote-splicing c)))"),
+            ("#true #false", "#t"),
+            ("#x1F", "31"),
+            ("#e1.5", "3/2"),
+            ("#i1/2", "0.5"),
+            ("4/2", "2"),
+            ("1e2", "100.0"),
+            ("#\\x41", "#\\A"),
+            ("#\\x3bb", "#\\λ"),
+            ("\"\\x41;\"", "\"A\""),
+            ("#| block #| nested |# |# x", "x"),
+            ("; comment\n y", "y"),
+            ("#!fold-case ABC", "abc"),
+            ("(1 #;2 3)", "(1 3)"),
+            ("[1 2]", "#(1 2)"),
+        ];
+        for (text, written) in canonical {
+            assert_eq!(read_ok(text)[0], written, "reading {}", text);
+        }
     }
 }

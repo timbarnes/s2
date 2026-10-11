@@ -4,6 +4,8 @@ Planning documents, written 2026-10-10, before any code exists. They follow
 the practice s1 already uses (`../s1/design/*.md`): work out the design on
 paper, measure where possible, then implement in small steps.
 
+**Status:** P0 done 2026-10-10 ([phases/P0.md](phases/P0.md)). Next: P1.
+
 ## Goals
 
 1. **A fully R7RS-small system** at the level s1 already reaches: it passes

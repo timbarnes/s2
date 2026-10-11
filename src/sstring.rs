@@ -12,9 +12,10 @@
 //! goes through a method here that keeps the flag right.
 //!
 //! Scheme strings never change length, so the text is a `Box<str>` (16
-//! bytes) rather than a `String` (24): with the flag it fits beside
-//! `BigInt`, whose spare byte holds `SchemeValue`'s tag, and `SchemeValue`
-//! stays at 32 bytes (see the size assertion in gc/mod.rs).
+//! bytes) rather than a `String` (24).
+//!
+//! Forked from s1/src/gc/sstring.rs at bc6f118, unchanged apart from these
+//! docs.
 
 use std::fmt;
 use std::ops::Deref;

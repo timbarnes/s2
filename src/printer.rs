@@ -5,47 +5,37 @@
 //! more than once) are printed with datum labels (`#0=` / `#0#`), so
 //! printing terminates on circular data. Long lists are printed without
 //! recursion on the cdr.
+//!
+//! Forked from s1/src/printer.rs at bc6f118, adapted to `Value`. P0 prints
+//! the kinds of object the reader makes; procedures, ports, records and so
+//! on come back with the phases that add them.
 
-use crate::gc::SchemeValue::*;
-use crate::gc::{Callable, GcRef};
-use crate::gc_value;
+use crate::heap::{GcRef, Obj};
+use crate::value::Value;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 /// The external representation `display` produces: strings and characters
 /// appear as their raw text, at any depth. Cycles get datum labels.
-pub fn display_value(obj: &GcRef) -> String {
-    render(*obj, false, Labels::Cycles)
+pub fn display_value(obj: Value) -> String {
+    render(obj, false, Labels::Cycles)
 }
 
 /// The external representation `write` produces: strings and characters in
 /// the escaped form the reader accepts. Cycles get datum labels
 /// (`#0=(1 . #0#)`), so printing always terminates.
-pub fn print_value(obj: &GcRef) -> String {
-    render(*obj, true, Labels::Cycles)
-}
-
-/// `print_value`, cut to at most `max` characters (ending in `...`), for
-/// debugger output, where one large datum would bury everything else.
-pub fn print_value_limited(obj: &GcRef, max: usize) -> String {
-    let mut s = print_value(obj);
-    if let Some((cut, _)) = s.char_indices().nth(max.saturating_sub(3)) {
-        if s.len() > max {
-            s.truncate(cut);
-            s.push_str("...");
-        }
-    }
-    s
+pub fn print_value(obj: Value) -> String {
+    render(obj, true, Labels::Cycles)
 }
 
 /// `write-shared`: datum labels for every pair or vector that appears more
 /// than once, cyclic or not.
-pub fn write_shared_value(obj: &GcRef) -> String {
-    render(*obj, true, Labels::Shared)
+pub fn write_shared_value(obj: Value) -> String {
+    render(obj, true, Labels::Shared)
 }
 
 /// `write-simple`: no datum labels (loops forever on cyclic data).
-pub fn write_simple_value(obj: &GcRef) -> String {
-    render(*obj, true, Labels::None)
+pub fn write_simple_value(obj: Value) -> String {
+    render(obj, true, Labels::None)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -71,12 +61,11 @@ struct Ctx {
 }
 
 /// Print `obj` in `write` or `display` style, labelling per `mode`.
-fn render(obj: GcRef, write: bool, mode: Labels) -> String {
-    let needs = match mode {
-        Labels::None => HashSet::default(),
-        _ if !is_compound(obj) => HashSet::default(),
-        Labels::Cycles => cycle_targets(obj),
-        Labels::Shared => shared_nodes(obj),
+fn render(obj: Value, write: bool, mode: Labels) -> String {
+    let needs = match (mode, compound(obj)) {
+        (Labels::None, _) | (_, None) => HashSet::default(),
+        (Labels::Cycles, Some(r)) => cycle_targets(r),
+        (Labels::Shared, Some(r)) => shared_nodes(r),
     };
     let mut ctx = Ctx {
         write,
@@ -88,16 +77,17 @@ fn render(obj: GcRef, write: bool, mode: Labels) -> String {
     out
 }
 
-/// Whether `obj` can be part of a cycle: a pair or vector.
-fn is_compound(obj: GcRef) -> bool {
-    matches!(gc_value!(obj), Pair(..) | Vector(_))
+/// The object, if `v` can be part of a cycle: a pair or vector.
+fn compound(v: Value) -> Option<GcRef> {
+    let r = v.as_ref()?;
+    matches!(r.get().kind, Obj::Pair { .. } | Obj::Vector(_)).then_some(r)
 }
 
 /// The children a label search follows.
-fn children(obj: GcRef) -> Vec<GcRef> {
-    match gc_value!(obj) {
-        Pair(car, cdr) => vec![*car, *cdr],
-        Vector(items) => items.clone(),
+fn children(obj: GcRef) -> Vec<Value> {
+    match &obj.get().kind {
+        Obj::Pair { car, cdr } => vec![car.get(), cdr.get()],
+        Obj::Vector(items) => items.iter().map(|c| c.get()).collect(),
         _ => Vec::new(),
     }
 }
@@ -117,7 +107,7 @@ fn cycle_targets(root: GcRef) -> HashSet<GcRef> {
     while let Some(step) = stack.pop() {
         match step {
             Step::Enter(node) => {
-                if !is_compound(node) || done.contains(&node) {
+                if done.contains(&node) {
                     continue;
                 }
                 if on_path.contains(&node) {
@@ -126,7 +116,7 @@ fn cycle_targets(root: GcRef) -> HashSet<GcRef> {
                 }
                 on_path.insert(node);
                 stack.push(Step::Exit(node));
-                for child in children(node).into_iter().rev() {
+                for child in children(node).into_iter().rev().filter_map(compound) {
                     stack.push(Step::Enter(child));
                 }
             }
@@ -145,14 +135,11 @@ fn shared_nodes(root: GcRef) -> HashSet<GcRef> {
     let mut shared = HashSet::default();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
-        if !is_compound(node) {
-            continue;
-        }
         if !seen.insert(node) {
             shared.insert(node);
             continue;
         }
-        stack.extend(children(node));
+        stack.extend(children(node).into_iter().filter_map(compound));
     }
     shared
 }
@@ -174,35 +161,38 @@ fn label_prefix(out: &mut String, obj: GcRef, ctx: &mut Ctx) -> bool {
     false
 }
 
-/// Append the representation of `obj` to `out`.
-fn print_into(out: &mut String, obj: GcRef, ctx: &mut Ctx) {
+/// Append the representation of `v` to `out`.
+fn print_into(out: &mut String, v: Value, ctx: &mut Ctx) {
     let write = ctx.write;
-    match gc_value!(obj) {
-        Pair(_, _) => {
+    let Some(obj) = v.as_ref() else {
+        return print_immediate(out, v, write);
+    };
+    match &obj.get().kind {
+        Obj::Pair { .. } => {
             if label_prefix(out, obj, ctx) {
                 return;
             }
             out.push('(');
-            let mut current = obj;
+            let mut current = v;
             let mut first = true;
             loop {
-                match gc_value!(current) {
+                match current.as_ref().map(|r| (r, &r.get().kind)) {
                     // A labelled tail is printed in dotted form, so its label
                     // (or reference) can appear.
-                    Pair(..) if !first && ctx.needs.contains(&current) => {
+                    Some((r, Obj::Pair { .. })) if !first && ctx.needs.contains(&r) => {
                         out.push_str(" . ");
                         print_into(out, current, ctx);
                         break;
                     }
-                    Pair(car, cdr) => {
+                    Some((_, Obj::Pair { car, cdr })) => {
                         if !first {
                             out.push(' ');
                         }
-                        print_into(out, *car, ctx);
-                        current = *cdr;
+                        print_into(out, car.get(), ctx);
+                        current = cdr.get();
                         first = false;
                     }
-                    Nil => break,
+                    _ if current.is_nil() => break,
                     _ => {
                         out.push_str(" . ");
                         print_into(out, current, ctx);
@@ -212,96 +202,56 @@ fn print_into(out: &mut String, obj: GcRef, ctx: &mut Ctx) {
             }
             out.push(')');
         }
-        Vector(v) => {
+        Obj::Vector(items) => {
             if label_prefix(out, obj, ctx) {
                 return;
             }
             out.push_str("#(");
-            print_separated(out, v, ctx);
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                print_into(out, item.get(), ctx);
+            }
             out.push(')');
         }
-        Bytevector(b) => {
+        Obj::Bytevector(b) => {
             out.push_str("#u8(");
             for (i, byte) in b.iter().enumerate() {
                 if i > 0 {
                     out.push(' ');
                 }
-                out.push_str(&byte.to_string());
+                out.push_str(&byte.get().to_string());
             }
             out.push(')');
         }
-        // The values of a `(values ...)` package that reached a printer.
-        Values(v) => print_separated(out, v, ctx),
-        Symbol(s) if write => write_symbol(out, s),
-        Symbol(s) => out.push_str(s),
-        Int(i) => out.push_str(&i.to_string()),
-        Rational(r) => out.push_str(&format!("{}/{}", r.numer(), r.denom())),
-        Float(f) => out.push_str(&format_float(*f)),
-        Str(s) if write => write_string(out, s),
-        Str(s) => out.push_str(s),
-        Char(c) if write => write_char(out, *c),
-        Char(c) => out.push(*c),
-        Bool(true) => out.push_str("#t"),
-        Bool(false) => out.push_str("#f"),
-        Nil => out.push_str("()"),
-        Void => {}
-        Undefined => out.push_str("#<undefined>"),
-        Eof => out.push_str("#<eof>"),
-        // Procedures and syntax have no external representation (R7RS), so
-        // they print as opaque #<...> forms; `procedure-source` gives a
-        // closure's source as data.
-        Callable(variant) => out.push_str(&match &**variant {
-            Callable::Builtin { name, .. } | Callable::SysBuiltin { name, .. } => format!("#<procedure {}>", name),
-            Callable::SpecialForm { name, .. } => format!("#<syntax {}>", name),
-            Callable::Closure { name, .. } | Callable::CaseLambda { name, .. } => opaque("procedure", name),
-            Callable::Macro { name, .. } => opaque("macro", name),
-            Callable::SyntaxRules(_) => "#<syntax-rules>".to_string(),
-        }),
-        Port(port) => out.push_str(&describe_port(port)),
-        Continuation(_) => out.push_str("#<continuation>"),
-        Environment(_) => out.push_str("#<environment>"),
-        RecordType(t) => {
-            out.push_str("#<record-type ");
-            print_into(out, t.name, ctx);
-            out.push('>');
-        }
-        Record(r) => {
-            out.push_str("#<");
-            if let RecordType(t) = gc_value!(r.rtype) {
-                print_into(out, t.name, ctx);
-            }
-            for f in &r.fields {
-                out.push(' ');
-                print_into(out, *f, ctx);
-            }
-            out.push('>');
-        }
-        ErrorObject(e) => {
-            out.push_str("#<error ");
-            let saved = ctx.write;
-            ctx.write = true;
-            print_into(out, e.message, ctx);
-            let mut rest = e.irritants;
-            while let Pair(car, cdr) = gc_value!(rest) {
-                out.push(' ');
-                print_into(out, *car, ctx);
-                rest = *cdr;
-            }
-            ctx.write = saved;
-            out.push('>');
-        }
-        TailCallScheduled => out.push_str("print_value: unprintable."),
+        Obj::Symbol(s) if write => write_symbol(out, s),
+        Obj::Symbol(s) => out.push_str(s),
+        Obj::BigInt(i) => out.push_str(&i.to_string()),
+        Obj::Rational(r) => out.push_str(&format!("{}/{}", r.numer(), r.denom())),
+        Obj::Str(s) if write => write_string(out, &s.borrow()),
+        Obj::Str(s) => out.push_str(&s.borrow()),
     }
 }
 
-/// Print `items` separated by spaces.
-fn print_separated(out: &mut String, items: &[GcRef], ctx: &mut Ctx) {
-    for (i, item) in items.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        print_into(out, *item, ctx);
+/// Append a value that isn't a heap object.
+fn print_immediate(out: &mut String, v: Value, write: bool) {
+    if let Some(n) = v.as_fixnum() {
+        out.push_str(&n.to_string());
+    } else if let Some(f) = v.as_flonum() {
+        out.push_str(&format_float(f));
+    } else if let Some(c) = v.as_char() {
+        if write { write_char(out, c) } else { out.push(c) }
+    } else if let Some(b) = v.as_bool() {
+        out.push_str(if b { "#t" } else { "#f" });
+    } else if v.is_nil() {
+        out.push_str("()");
+    } else if v.is_eof() {
+        out.push_str("#<eof>");
+    } else if v.is_undefined() {
+        out.push_str("#<undefined>");
     }
+    // Unspecified prints as nothing, so the REPL shows nothing for it.
 }
 
 /// Format a flonum so it reads back as one: always with a decimal point or
@@ -363,7 +313,7 @@ fn needs_bars(s: &str) -> bool {
     s == "."
         || first == '#'
         || numeric_start
-        || crate::number_syntax::parse_number(s, 10) != crate::number_syntax::NumberSyntax::NotANumber
+        || crate::reader::number_syntax::parse_number(s, 10) != crate::reader::number_syntax::NumberSyntax::NotANumber
         || s.chars().any(|c| c.is_whitespace() || c.is_control() || "()[]\";'`,|\\".contains(c))
 }
 
@@ -405,84 +355,69 @@ fn write_char(out: &mut String, c: char) {
     }
 }
 
-/// `#<kind name>`, or `#<kind>` for an anonymous object.
-fn opaque(kind: &str, name: &Option<String>) -> String {
-    match name {
-        Some(name) => format!("#<{} {}>", kind, name),
-        None => format!("#<{}>", kind),
-    }
-}
-
-/// The printed form of a port, e.g. `#<input-port stdin>`.
-fn describe_port(port: &crate::io::PortKind) -> String {
-    use crate::io::PortKind::*;
-    match port {
-        Stdin => "#<input-port stdin>".to_string(),
-        Stdout => "#<output-port stdout>".to_string(),
-        Stderr => "#<output-port stderr>".to_string(),
-        StringPortInput { .. } => "#<input-port string>".to_string(),
-        StringPortOutput { .. } => "#<output-port string>".to_string(),
-        BytevectorInput { .. } => "#<binary-input-port bytevector>".to_string(),
-        BytevectorOutput { .. } => "#<binary-output-port bytevector>".to_string(),
-        FileOutput { name, binary: false, .. } => format!("#<output-port {:?}>", name),
-        FileOutput { name, binary: true, .. } => format!("#<binary-output-port {:?}>", name),
-        Closed { .. } => "#<closed-port>".to_string(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::{RunTime, RunTimeStruct};
-    use crate::gc::*;
+    use crate::heap::Heap;
     use num_bigint::BigInt;
 
-    #[test]
-    fn test_print_value_basic_types() {
-        let mut ev = RunTimeStruct::new();
-        let mut ec = RunTime::from_eval(&mut ev);
-        let heap = &mut ec.heap;
-
-        assert_eq!(print_value(&new_int(heap, BigInt::from(123))), "123");
-        assert_eq!(print_value(&new_float(heap, 3.14)), "3.14");
-        assert_eq!(print_value(&new_bool(heap, true)), "#t");
-        assert_eq!(print_value(&new_bool(heap, false)), "#f");
-        assert_eq!(print_value(&new_string(heap, "hello")), "\"hello\"");
-        assert_eq!(print_value(&new_char(heap, 'a')), "#\\a");
-        assert_eq!(print_value(&new_char(heap, '\n')), "#\\newline");
-        assert_eq!(print_value(&heap.intern_symbol("foo")), "foo");
-        assert_eq!(print_value(&heap.nil_s()), "()");
-        assert_eq!(print_value(&heap.void()), "");
-        assert_eq!(print_value(&heap.unspecified()), "#<undefined>");
-        assert_eq!(print_value(&heap.eof()), "#<eof>");
+    fn int(heap: &mut Heap, n: i64) -> Value {
+        heap.integer(BigInt::from(n))
     }
 
     #[test]
-    fn test_write_escapes_and_float_format() {
-        let mut ev = RunTimeStruct::new();
-        let mut ec = RunTime::from_eval(&mut ev);
-        let heap = &mut ec.heap;
+    fn basic_types() {
+        let mut heap = Heap::new();
+        let foo = heap.intern("foo");
+        let hello = heap.string("hello");
+        for (v, written, displayed) in [
+            (int(&mut heap, 123), "123", "123"),
+            (Value::flonum(3.14), "3.14", "3.14"),
+            (Value::TRUE, "#t", "#t"),
+            (Value::FALSE, "#f", "#f"),
+            (hello, "\"hello\"", "hello"),
+            (Value::char('a'), "#\\a", "a"),
+            (Value::char('\n'), "#\\newline", "\n"),
+            (foo, "foo", "foo"),
+            (Value::NIL, "()", "()"),
+            (Value::UNSPECIFIED, "", ""),
+            (Value::UNDEFINED, "#<undefined>", "#<undefined>"),
+            (Value::EOF, "#<eof>", "#<eof>"),
+        ] {
+            assert_eq!(print_value(v), written);
+            assert_eq!(display_value(v), displayed);
+        }
+    }
+
+    #[test]
+    fn write_escapes_and_float_format() {
+        let mut heap = Heap::new();
 
         // Strings: quote, backslash and control characters are escaped.
-        let s = new_string(heap, "a\"b\\c\nd\te\u{1}");
-        assert_eq!(print_value(&s), r#""a\"b\\c\nd\te\x1;""#);
-        assert_eq!(display_value(&s), "a\"b\\c\nd\te\u{1}");
+        let s = heap.string("a\"b\\c\nd\te\u{1}");
+        assert_eq!(print_value(s), r#""a\"b\\c\nd\te\x1;""#);
+        assert_eq!(display_value(s), "a\"b\\c\nd\te\u{1}");
 
         // Characters use R7RS names.
-        assert_eq!(print_value(&new_char(heap, ' ')), "#\\space");
-        assert_eq!(print_value(&new_char(heap, '\u{7}')), "#\\alarm");
-        assert_eq!(print_value(&new_char(heap, '\0')), "#\\null");
-        assert_eq!(print_value(&new_char(heap, '\u{1}')), "#\\x1");
+        assert_eq!(print_value(Value::char(' ')), "#\\space");
+        assert_eq!(print_value(Value::char('\u{7}')), "#\\alarm");
+        assert_eq!(print_value(Value::char('\0')), "#\\null");
+        assert_eq!(print_value(Value::char('\u{1}')), "#\\x1");
 
         // Flonums always read back as inexact.
-        assert_eq!(print_value(&new_float(heap, 2.0)), "2.0");
-        assert_eq!(print_value(&new_float(heap, -0.0)), "-0.0");
-        assert_eq!(print_value(&new_float(heap, 1e21)), "1.0e+21");
-        assert_eq!(print_value(&new_float(heap, 5e-324)), "5.0e-324");
-        assert_eq!(print_value(&new_float(heap, 1.7976931348623157e308)), "1.7976931348623157e+308");
-        assert_eq!(print_value(&new_float(heap, f64::INFINITY)), "+inf.0");
-        assert_eq!(print_value(&new_float(heap, f64::NEG_INFINITY)), "-inf.0");
-        assert_eq!(print_value(&new_float(heap, f64::NAN)), "+nan.0");
+        for (f, written) in [
+            (2.0, "2.0"),
+            (-0.0, "-0.0"),
+            (1e21, "1.0e+21"),
+            (5e-324, "5.0e-324"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            (f64::INFINITY, "+inf.0"),
+            (f64::NEG_INFINITY, "-inf.0"),
+            (f64::NAN, "+nan.0"),
+        ] {
+            assert_eq!(print_value(Value::flonum(f)), written);
+        }
 
         // Symbols that wouldn't read back bare are written with bars.
         for (name, written) in [
@@ -501,96 +436,45 @@ mod tests {
             ("\\123", "|\\\\123|"),
             ("nil", "nil"),
         ] {
-            let sym = heap.intern_symbol(name);
-            assert_eq!(print_value(&sym), written, "symbol {:?}", name);
-            assert_eq!(display_value(&sym), name);
+            let sym = heap.intern(name);
+            assert_eq!(print_value(sym), written, "symbol {:?}", name);
+            assert_eq!(display_value(sym), name);
         }
 
         // display reaches strings and characters nested in a list.
-        let c = new_char(heap, 'x');
-        let str_in_list = new_string(heap, "s");
-        let tail = new_pair(heap, c, heap.nil_s());
-        let list = new_pair(heap, str_in_list, tail);
-        assert_eq!(display_value(&list), "(s x)");
-        assert_eq!(print_value(&list), "(\"s\" #\\x)");
+        let s = heap.string("s");
+        let list = heap.list(vec![s, Value::char('x')]);
+        assert_eq!(display_value(list), "(s x)");
+        assert_eq!(print_value(list), "(\"s\" #\\x)");
     }
 
     #[test]
-    fn test_print_value_compound_types() {
-        let mut ev = RunTimeStruct::new();
-        let mut ec = RunTime::from_eval(&mut ev);
-        let heap = &mut ec.heap;
-
-        // Proper List
-        let val1 = new_int(heap, BigInt::from(1));
-        let val2 = new_int(heap, BigInt::from(2));
-        let val3 = new_int(heap, BigInt::from(3));
-        let l1 = new_pair(heap, val3, heap.nil_s());
-        let l2 = new_pair(heap, val2, l1);
-        let list = new_pair(heap, val1, l2);
-        assert_eq!(print_value(&list), "(1 2 3)");
-
-        // Dotted List
-        let val1_dotted = new_int(heap, BigInt::from(1));
-        let val2_dotted = new_int(heap, BigInt::from(2));
-        let dotted_list = new_pair(heap, val1_dotted, val2_dotted);
-        assert_eq!(print_value(&dotted_list), "(1 . 2)");
-
-        // Vector
-        let vec_val1 = new_int(heap, BigInt::from(1));
-        let vec_val2 = new_bool(heap, true);
-        let vec_val3 = new_string(heap, "foo");
-        let vector = new_vector(heap, vec![vec_val1, vec_val2, vec_val3]);
-        assert_eq!(print_value(&vector), "#(1 #t \"foo\")");
-    }
-
-    #[test]
-    fn test_display_value_basic_types() {
-        let mut ev = RunTimeStruct::new();
-        let mut ec = RunTime::from_eval(&mut ev);
-        let heap = &mut ec.heap;
-
-        assert_eq!(display_value(&new_int(heap, BigInt::from(123))), "123");
-        assert_eq!(display_value(&new_float(heap, 3.14)), "3.14");
-        assert_eq!(display_value(&new_bool(heap, true)), "#t");
-        assert_eq!(display_value(&new_bool(heap, false)), "#f");
-        assert_eq!(display_value(&new_string(heap, "hello")), "hello"); // No quotes
-        assert_eq!(display_value(&new_char(heap, 'a')), "a"); // No #\ prefix
-        assert_eq!(display_value(&new_char(heap, '\n')), "\n");
-        assert_eq!(display_value(&heap.intern_symbol("foo")), "foo");
-        assert_eq!(display_value(&heap.nil_s()), "()");
-        assert_eq!(display_value(&heap.void()), "");
-        assert_eq!(display_value(&heap.unspecified()), "#<undefined>"); // Corrected
-        assert_eq!(display_value(&heap.eof()), "#<eof>"); // Corrected
-    }
-
-    #[test]
-    fn test_display_value_compound_types() {
-        let mut ev = RunTimeStruct::new();
-        let mut ec = RunTime::from_eval(&mut ev);
-        let heap = &mut ec.heap;
-
-        // Proper List
-        let val1 = new_int(heap, BigInt::from(1));
-        let val2 = new_int(heap, BigInt::from(2));
-        let val3 = new_int(heap, BigInt::from(3));
-        let l1 = new_pair(heap, val3, heap.nil_s());
-        let l2 = new_pair(heap, val2, l1);
-        let list = new_pair(heap, val1, l2);
-        assert_eq!(display_value(&list), "(1 2 3)");
-
-        // Dotted List
-        let val1_dotted = new_int(heap, BigInt::from(1));
-        let val2_dotted = new_int(heap, BigInt::from(2));
-        let dotted_list = new_pair(heap, val1_dotted, val2_dotted);
-        assert_eq!(display_value(&dotted_list), "(1 . 2)");
-
-        // Vector
-        let vec_val1 = new_int(heap, BigInt::from(1));
-        let vec_val2 = new_bool(heap, true);
-        let vec_val3 = new_string(heap, "foo");
-        let vector = new_vector(heap, vec![vec_val1, vec_val2, vec_val3]);
+    fn compound_types() {
+        let mut heap = Heap::new();
+        let (one, two, three) = (int(&mut heap, 1), int(&mut heap, 2), int(&mut heap, 3));
+        let list = heap.list(vec![one, two, three]);
+        assert_eq!(print_value(list), "(1 2 3)");
+        let dotted = heap.cons(one, two);
+        assert_eq!(print_value(dotted), "(1 . 2)");
+        let foo = heap.string("foo");
+        let vector = heap.vector(vec![one, Value::TRUE, foo]);
+        assert_eq!(print_value(vector), "#(1 #t \"foo\")");
         // display applies at every depth, so the nested string is unquoted.
-        assert_eq!(display_value(&vector), "#(1 #t foo)");
+        assert_eq!(display_value(vector), "#(1 #t foo)");
+    }
+
+    #[test]
+    fn shared_and_cyclic() {
+        let mut heap = Heap::new();
+        let a = heap.intern("a");
+        let x = heap.list(vec![a]);
+        let both = heap.list(vec![x, x]);
+        assert_eq!(print_value(both), "((a) (a))");
+        assert_eq!(write_shared_value(both), "(#0=(a) #0#)");
+        let cell = heap.cons(a, Value::NIL);
+        if let Obj::Pair { cdr, .. } = &cell.as_obj().unwrap().kind {
+            cdr.set(cell);
+        }
+        assert_eq!(print_value(cell), "#0=(a . #0#)");
     }
 }
