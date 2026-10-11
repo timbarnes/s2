@@ -20,11 +20,12 @@ a sense of scale.
 P0 skeleton ─► P1 first compiler+VM ─► P2 lambda/closures/tail calls ─► P3 GC
    ─► P4 set!/letrec ─► P5 expander ─► P6 data types+builtins ─► P7 control
    ─► P8 libraries/eval ─► P9 conformance ─► P10 performance ─► P11 bytecode files
-   ─► (P12 compiler in Scheme)
+   ─► P12 comparison with other Schemes ─► P13 compiler in Scheme
 ```
 
 P0-P4 build the core compiler and VM on a tiny language. P5-P9 grow it to
-full R7RS. P10-P12 make it fast and complete the picture.
+full R7RS. P10-P11 make it fast and complete the picture. P12-P13 were added
+after P10 (06): see how s2 compares, then make it self-hosting.
 
 ---
 
@@ -438,18 +439,64 @@ cached as compiled files next to their `.sld`, with a staleness check.
 bytes or decodes to `Op` on load (measure it); how macros exported by a
 compiled library are stored (as `syntax-rules` source, re-parsed on load).
 
+The format should also serve P13's boot image (06): a whole set of
+libraries in one file, loadable before any Scheme has run. `core.scm` is
+the first user: shipped compiled, so startup doesn't compile it.
+
 ---
 
-## P12 (optional). The compiler in Scheme
+## P12. How s2 compares with other Schemes
+
+**Goal:** see where s2 stands against established Schemes in completeness,
+features, architecture and performance, and get a performance baseline
+for P13 (06 §3).
+
+**Teaches:** how other systems answered the questions in 03, and what
+their answers buy them.
+
+**Build:**
+- install chibi, Guile, Chicken, Gambit, Chez, Racket, Gauche and s7
+  locally (most are in Homebrew), alongside s1;
+- port ecraven's `r7rs-benchmarks` runner to include s1 and s2, and run
+  the suite on every system on this machine. Medians of interleaved runs,
+  as in P10. Programs s2 can't run are listed with the reason, and fixed
+  if the missing feature is R7RS;
+- run chibi's R7RS suite on the systems where it runs;
+- `plan/07-comparison.md`: tables of completeness and features (numeric
+  tower, macro systems, SRFIs, Unicode, threads, FFI, debugging, compiled
+  files), of architecture (value representation, GC, continuations,
+  compiler language and target), and of the benchmark results.
+
+**Decides:** nothing in s2's design by itself. It records the baseline
+that P13 is measured against, and may suggest work for later phases.
+
+**Exit tests:** the benchmark suite runs from one script; s2's results are
+reproducible within the noise found in P10.
+
+---
+
+## P13. The compiler in Scheme
 
 **Goal:** rewrite the compiler passes, from the expander to codegen, in
 Scheme, run them on s2, and have s2 compile itself.
 
 **Teaches:** bootstrapping, as real Scheme systems do it (02, option E).
 
+Done in this repository, not a fork (06 §1). Before it starts, the
+repository is tagged `rust-compiler`. During it, a cargo feature keeps the
+Rust compiler buildable as the oracle.
+
 The Rust passes work on plain data with simple interfaces between them, so
 they can be ported one at a time. For example, analysis in Scheme can feed
 codegen in Rust, with each pass checked against the Rust version's output.
+The finished compiler ships as a boot image in P11's format. The
+expander can then load library files directly, which removes P8's
+`pending_load`.
+
+**Benchmark:** compile speed and run-time speed against P12's baseline.
+
+**Decides:** whether the Rust compiler is kept, behind a feature, or
+removed; whether to offer a runtime without a compiler (06 §2).
 
 ---
 
@@ -468,3 +515,4 @@ codegen in Rust, with each pass checked against the Rust version's output.
 | D10 expander | P5 |
 | D11 core AST | P1, grown through P5 |
 | D5 encoding (second half) | P11 |
+| U7-U10 directions after P10 | 06, after P10 |

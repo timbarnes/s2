@@ -41,6 +41,7 @@ paper, measure where possible, then implement in small steps.
 | [03-architecture.md](03-architecture.md) | The compiler pipeline and each core design decision: value representation, GC, VM model, closures, continuations, macros, libraries |
 | [04-roadmap.md](04-roadmap.md) | The incremental phases, each with goals, what it teaches, decisions, exit tests and benchmarks |
 | [05-testing.md](05-testing.md) | How each phase is verified: differential testing against s1, golden disassembly, GC stress, conformance, benchmarks |
+| [06-directions.md](06-directions.md) | Written after P10: the compiler in Scheme here or in a fork, a reduced runtime, comparing with other Schemes, embedded targets, native code |
 
 Read them in order the first time. During implementation, 04 is the working
 document, and 03 is the reference for why things are shaped as they are.
@@ -51,12 +52,16 @@ Already made by the user:
 
 | # | Decision | Choice |
 |---|---|---|
-| U1 | Language of the compiler | Rust first; porting it to Scheme is an optional late phase (P12) |
+| U1 | Language of the compiler | Rust first; porting it to Scheme is a late phase (P13) |
 | U2 | Compilation mode | In-process first; bytecode files later (P11) |
 | U3 | s1 extras | None at first. The core stays pure, and s1 stays available for testing code |
 | U4 | How much of s1 to reuse | D1 accepted 2026-10-10: fork and adapt into a new crate |
 | U5 | Speed target | 5-10x faster than s1 on `fib` and the typical program; accepted for now |
-| U6 | Complex numbers | Out. Reconsider at P9 |
+| U6 | Complex numbers | Out. Confirmed at P9 |
+| U7 | Where the compiler in Scheme is built | In this repository, tagged first; not a fork (06 §1) |
+| U8 | Phases after P11 | P12 comparison with other Schemes, P13 the compiler in Scheme |
+| U9 | Embedded targets (ESP32) | Not planned (06 §4) |
+| U10 | Native code | Not planned for now (06 §5) |
 
 Recommended in these documents, each to be confirmed:
 

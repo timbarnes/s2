@@ -179,7 +179,8 @@ to teach.
 
 - B becomes phase P11 (bytecode files and separate binaries, from the same
   crate).
-- E becomes optional phase P12 (port the compiler to Scheme).
+- E becomes optional phase P12 (port the compiler to Scheme). After P10
+  it became P13, no longer optional (06).
 - A and C are rejected: A because of size and the representation
   constraint, C because of the representation constraint and the cost of
   keeping s1 working.
