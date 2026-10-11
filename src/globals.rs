@@ -26,6 +26,11 @@ impl Env {
         *self.cells.entry(name).or_insert_with(|| heap.global(name))
     }
 
+    /// The binding cells, which are GC roots.
+    pub fn roots(&self) -> impl Iterator<Item = Value> + '_ {
+        self.cells.values().map(|&c| Value::obj(c))
+    }
+
     /// Bind `name` to `value`, as a top-level `define` does.
     pub fn define(&mut self, heap: &mut Heap, name: &str, value: Value) {
         let sym = heap.intern(name).as_ref().unwrap();

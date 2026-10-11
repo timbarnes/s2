@@ -135,8 +135,12 @@ mod tests {
     use super::*;
 
     /// Evaluate each form in `src` and write each result, or `error: msg`.
+    /// The collector runs at every safepoint and poisons what it frees, so
+    /// every result test is also a GC test.
     fn run(src: &str) -> Vec<String> {
         let mut s = Session::new(false);
+        s.heap.stress = true;
+        s.heap.poison = true;
         let mut port = io::new_string_port_input(src);
         let mut out = Vec::new();
         loop {
@@ -222,6 +226,10 @@ mod tests {
         // Each closure has its own copy of the captured values.
         check("(define (k x) (lambda () x)) (define k1 (k 1)) (define k2 (k 2)) (k1) (k2)",
               &["k", "k1", "k2", "1", "2"]);
+        // Captured heap objects and a lambda's quoted constants survive
+        // collections: reachable only through the closure and its template.
+        check("(define (k x) (lambda () x)) (define kp (k (cons 1 (cons \"s\" '())))) (kp) (define (q) '(a #(b \"c\"))) (q)",
+              &["k", "kp", "(1 \"s\")", "q", "(a #(b \"c\"))"]);
     }
 
     #[test]
@@ -252,6 +260,48 @@ mod tests {
         assert!(stack < 64 && frames < 64, "stack {} frames {}", stack, frames);
         // A non-tail call does grow the frame stack.
         check("(define (deep n) (if (= n 0) (%frame-depth) (+ 0 (deep (- n 1))))) (deep 100)", &["deep", "100"]);
+    }
+
+    /// Evaluate `src` in a fresh session with the default GC schedule and
+    /// return the session and the last result.
+    fn session_after(src: &str) -> (Session, Value) {
+        let mut s = Session::new(false);
+        s.heap.stress = false;
+        let mut port = io::new_string_port_input(src);
+        let mut last = Value::UNSPECIFIED;
+        while let Ok(datum) = parse(&mut s.heap, &mut port) {
+            last = s.eval(datum).unwrap();
+        }
+        (s, last)
+    }
+
+    #[test]
+    fn allocating_loop_runs_in_flat_memory() {
+        let (s, last) = session_after(
+            "(define (loop n) (if (= n 0) 'done (begin (cons n (cons n '())) (loop (- n 1))))) (loop 1000000)",
+        );
+        assert_eq!(printer::print_value(last), "done");
+        // Two million pairs were made; the heap never held more than one
+        // collection interval's worth.
+        assert!(s.heap.collections > 50, "{} collections", s.heap.collections);
+        assert!(s.heap.len() < 25_000, "{} objects", s.heap.len());
+    }
+
+    #[test]
+    fn deep_recursion_collects_in_linear_time() {
+        // Each of the 100,000 frames keeps a pair alive in a `let` slot, so
+        // the live heap grows throughout. Marking work stays within a small
+        // multiple of the allocation; a fixed collection interval would
+        // re-mark the growing heap every interval (3n here, quadratic in
+        // general).
+        let n = 100_000;
+        let (s, last) = session_after(&format!(
+            "(define (deep n) (let ((p (cons n '()))) (if (= n 0) 0 (+ (car p) (deep (- n 1)) (- 0 (car p)) 1)))) (deep {})",
+            n
+        ));
+        assert_eq!(last.as_fixnum(), Some(n));
+        assert!(s.heap.collections >= 2, "{} collections", s.heap.collections);
+        assert!(s.heap.marked < 2 * n as usize + 20_000, "{} marked", s.heap.marked);
     }
 
     /// s1's `scheme/tail_tests.scm`, for the tail contexts P2 has: a loop

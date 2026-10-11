@@ -14,6 +14,11 @@
 //!   current frame's slots, then enters the callee *without* saving a
 //!   frame. The callee then returns straight to the current procedure's
 //!   caller, so a loop written as a tail call runs in constant space.
+//!
+//! **Safepoints** (plan/03 §4): the VM collects garbage only on entry to
+//! `Call` and `TailCall`. Every loop is a tail call, and every allocation
+//! happens in a call or between two of them, so these are enough. There,
+//! every live value is in the roots `safepoint` passes to the heap.
 
 use crate::builtins::{PrimFn, Primitive};
 use crate::globals::{Env, cell_name, cell_value};
@@ -150,6 +155,7 @@ impl Vm {
                     self.stack.push(c);
                 }
                 Op::Call(argc) => {
+                    self.safepoint(heap, env, closure);
                     let base = self.stack.len() - argc as usize - 1;
                     let f = self.stack[base];
                     match f.as_obj().map(|o| &o.kind) {
@@ -171,6 +177,7 @@ impl Vm {
                     }
                 }
                 Op::TailCall(argc) => {
+                    self.safepoint(heap, env, closure);
                     let base = self.stack.len() - argc as usize - 1;
                     let f = self.stack[base];
                     match f.as_obj().map(|o| &o.kind) {
@@ -193,6 +200,17 @@ impl Vm {
                 }
                 Op::Return => do_return!(self.stack.pop().unwrap()),
             }
+        }
+    }
+
+    /// Collect garbage if a collection is due. The roots are the value
+    /// stack, the closures saved in frames, the running closure, and the
+    /// environment's binding cells (the heap adds the symbol table).
+    #[inline]
+    fn safepoint(&self, heap: &mut Heap, env: &Env, closure: GcRef) {
+        if heap.needs_gc() {
+            let frames = self.frames.iter().map(|f| Value::obj(f.closure));
+            heap.collect(self.stack.iter().copied().chain(frames).chain([Value::obj(closure)]).chain(env.roots()));
         }
     }
 
