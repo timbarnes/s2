@@ -4,7 +4,7 @@ Planning documents, written 2026-10-10, before any code exists. They follow
 the practice s1 already uses (`../s1/design/*.md`): work out the design on
 paper, measure where possible, then implement in small steps.
 
-**Status:** P0-P7 done 2026-10-10, P8-P10 2026-10-11 ([P0](phases/P0.md), [P1](phases/P1.md), [P2](phases/P2.md), [P3](phases/P3.md), [P4](phases/P4.md), [P5](phases/P5.md), [P6](phases/P6.md), [P7](phases/P7.md), [P8](phases/P8.md), [P9](phases/P9.md), [P10](phases/P10.md)). Next: P11.
+**Status:** P0-P7 done 2026-10-10, P8-P11 2026-10-11 ([P0](phases/P0.md), [P1](phases/P1.md), [P2](phases/P2.md), [P3](phases/P3.md), [P4](phases/P4.md), [P5](phases/P5.md), [P6](phases/P6.md), [P7](phases/P7.md), [P8](phases/P8.md), [P9](phases/P9.md), [P10](phases/P10.md), [P11](phases/P11.md)). Next: P12.
 
 ## Goals
 
@@ -71,7 +71,7 @@ Recommended in these documents, each to be confirmed:
 | D2 | Value representation | An opaque `Value` type with unboxed fixnums, chars and immediates. Start as a 16-byte `Copy` enum, keep it behind methods, and move to a tagged word later if measurement says so | 03 §3 |
 | D3 | Garbage collector | s1's model: non-moving mark-sweep, epoch marks, collection only at safepoints, explicit roots | 03 §4 |
 | D4 | VM model | Stack-based, with frames on a single contiguous value stack | 03 §5 |
-| D5 | Instruction encoding | A Rust `enum Op` ("wordcode") first, a byte encoding when bytecode files arrive | 03 §6 |
+| D5 | Instruction encoding | A Rust `enum Op` ("wordcode") first, a byte encoding when bytecode files arrive. **P11:** files encode each instruction as a tag byte and LEB128 operands, decoded into `Op`s on load | 03 §6 |
 | D6 | Closures and variables | Flat closures, and assignment conversion: mutated captured variables live in boxes | 03 §7 |
 | D7 | Globals | Binding cells, as in s1, referenced directly from the constant pool | 03 §8 |
 | D8 | Continuations | Full copy of the stack on `call/cc`, and copy back on invoke. A segmented stack is an upgrade in P10 if benchmarks need it | 03 §10 |

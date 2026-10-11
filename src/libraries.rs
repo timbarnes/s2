@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins::{Error, Primitive, err, expected, kind, list_arg, prim, string_arg};
+use crate::compile::codegen::codegen;
+use crate::compile::expand::expand;
 use crate::compile::syntax_rules::{identifier, name as id_name, strip};
+use crate::fasl;
 use crate::globals::{Env, TopBinding, cell_value, env_of};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
 use crate::io::{PortKind, new_string_port_input};
@@ -53,6 +56,9 @@ pub struct Libraries {
     /// A library file an import needs loaded before it can be expanded
     /// (see the module comment).
     pub pending_load: Option<PathBuf>,
+    /// While a library file is compiled: every file read, for the compiled
+    /// file's staleness check.
+    reading: Option<Vec<PathBuf>>,
 }
 
 impl Libraries {
@@ -62,6 +68,16 @@ impl Libraries {
 
     pub fn insert(&mut self, name: LibraryName, library: Library) {
         self.table.insert(name, library);
+    }
+
+    /// The environments of the libraries `define-library` made.
+    pub fn environments(&self) -> impl Iterator<Item = GcRef> + '_ {
+        self.table.values().filter_map(|l| l.env)
+    }
+
+    /// The name of the library whose environment is `env`.
+    pub fn name_of(&self, env: GcRef) -> Option<LibraryName> {
+        self.table.iter().find(|(_, l)| l.env == Some(env)).map(|(n, _)| n.clone())
     }
 
     /// The names of all registered libraries, sorted.
@@ -268,6 +284,12 @@ fn find_library<'a>(heap: &'a mut Heap, name: &LibraryName, who: &str) -> Result
     Ok(heap.libraries.get(name).unwrap())
 }
 
+/// Check that library `name` is registered. If it isn't but its file can
+/// be found, the error leaves `pending_load` set, as for an import.
+pub fn require_library(heap: &mut Heap, name: &LibraryName) -> Result<(), String> {
+    find_library(heap, name, "load").map(|_| ())
+}
+
 /// The (name, binding) pairs an import set denotes (R7RS §5.2): a library
 /// name, or `only`, `except`, `prefix` or `rename` applied to an import
 /// set. Identifiers are compared by name, so an import made by a macro
@@ -381,6 +403,9 @@ pub fn collect_declarations(heap: &mut Heap, decls: &[Value], out: &mut Declarat
 /// Every datum in the file `name`, read with case folding for
 /// `include-ci`. Relative names are relative to the current directory.
 pub fn read_file_forms(heap: &mut Heap, name: &str, fold_case: bool, who: &str) -> Result<Vec<Value>, String> {
+    if let Some(reading) = &mut heap.libraries.reading {
+        reading.push(name.into());
+    }
     let content = std::fs::read_to_string(name).map_err(|e| format!("{}: could not read {}: {}", who, name, e))?;
     let mut port = new_string_port_input(&content);
     if let PortKind::StringPortInput { fold_case: fold, .. } = &port {
@@ -446,6 +471,38 @@ fn read_library_file(heap: &mut Heap, path: &str) -> Result<Vec<Value>, String> 
     let dir = Path::new(path).parent().map(Path::to_path_buf).unwrap_or_default();
     let forms = read_file_forms(heap, path, false, "import")?;
     Ok(forms.into_iter().map(|form| relocate_includes(heap, form, &dir)).collect())
+}
+
+/// The compiled code of the library file `path`, from `foo/bar.s2o` next
+/// to `foo/bar.sld` if that is fresh (`fasl::fresh`), or else compiled now
+/// and cached there. Compiling doesn't run anything, so the file's forms
+/// are expanded before any of them runs. Writing the cache is best effort.
+fn compiled_library(heap: &mut Heap, path: &str) -> Result<Vec<GcRef>, String> {
+    let target = heap.interaction.unwrap();
+    let cache = Path::new(path).with_extension("s2o");
+    if let Some(templates) = fasl::read_cached(heap, target, &cache)? {
+        return Ok(templates);
+    }
+    heap.libraries.reading = Some(Vec::new());
+    // A program being compiled may be recording its own changes to the
+    // same environment: they wait while this file is compiled.
+    let outer = env_of(target).borrow_mut().touched.replace(Vec::new());
+    let result = (|| {
+        let mut templates = Vec::new();
+        for form in read_library_file(heap, path)? {
+            let ast = expand(heap, target, form)?;
+            templates.push(codegen(heap, &ast));
+        }
+        Ok(templates)
+    })();
+    let sources = heap.libraries.reading.take().unwrap_or_default();
+    if let Ok(templates) = &result
+        && let Ok(bytes) = fasl::write(heap, target, templates, &sources)
+    {
+        fasl::write_cache(&cache, &bytes);
+    }
+    env_of(target).borrow_mut().touched = outer;
+    result
 }
 
 /// `form`, if it is a `define-library`, with its include declarations'
@@ -621,6 +678,22 @@ pub static PRIMITIVES: &[Primitive] = &[
         let path = string_arg(a[0], "%library-file-loading")?.borrow().to_string();
         h.libraries.loaded.insert(PathBuf::from(path));
         Ok(Value::UNSPECIFIED)
+    }),
+    // For %load-library: the library file's code, compiled, as a list of
+    // procedures to call in order; or the file of a library it needs
+    // loaded first; or #f if it can't be compiled ahead.
+    prim("%compiled-library", 1, Some(1), |h, a| {
+        let path = string_arg(a[0], "%compiled-library")?.borrow().to_string();
+        Ok(match compiled_library(h, &path) {
+            Ok(templates) => {
+                let thunks = templates.into_iter().map(|t| h.closure(t, std::iter::empty())).collect();
+                h.list(thunks)
+            }
+            Err(_) => match h.libraries.pending_load.take() {
+                Some(needed) => h.string(&needed.to_string_lossy()),
+                None => Value::FALSE,
+            },
+        })
     }),
     prim("%read-library-file", 1, Some(1), |h, a| {
         let path = string_arg(a[0], "%read-library-file")?.borrow().to_string();

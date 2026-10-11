@@ -484,11 +484,17 @@
 
 ;; Load a library file, for an import that needs one (src/libraries.rs):
 ;; marked loaded first, so a library that imports itself can't loop. Its
-;; forms are evaluated in the interaction environment.
+;; compiled code runs, loading first any library file it needs. A file
+;; that can't be compiled ahead has its forms evaluated one by one in the
+;; interaction environment instead, which also reports its errors.
 (define (%load-library path)
   (%library-file-loading path)
-  (for-each (lambda (form) (eval form (interaction-environment)))
-            (%read-library-file path)))
+  (let retry ()
+    (let ((compiled (%compiled-library path)))
+      (cond ((string? compiled) (%load-library compiled) (retry))
+            (compiled (for-each (lambda (thunk) (thunk)) compiled))
+            (else (for-each (lambda (form) (eval form (interaction-environment)))
+                            (%read-library-file path)))))))
 
 ;; What eval becomes when its expression imports a library whose file
 ;; isn't loaded yet.

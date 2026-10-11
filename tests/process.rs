@@ -150,3 +150,55 @@ fn script_exit_status() {
     assert_eq!(run_script("script-exit", "(exit 9)", &[]).0, 9);
     assert_eq!(run_script("script-ok", "(display 1)", &[]).0, 0);
 }
+
+/// Run s2 with `args` and `S2_LIBRARY_PATH` set to `libs`: the exit
+/// status and stdout.
+fn s2_with_libs(args: &[&str], libs: &std::path::Path) -> (i32, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_s2"))
+        .args(args)
+        .env("S2_LIBRARY_PATH", libs)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    (out.status.code().unwrap(), String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+#[test]
+fn compiled_programs() {
+    // Compiling runs nothing; the compiled program behaves as the source
+    // does, with its own arguments, and an error still ends it with 70.
+    let path = script("compiled", "(display (cdr (command-line))) (newline) (car '()) (display \"not reached\")");
+    let out = path.with_extension("s2o");
+    let compile = s2(&["--compile", path.to_str().unwrap(), "-o", out.to_str().unwrap()]);
+    assert_eq!((compile.status.code(), compile.stdout.as_slice()), (Some(0), &b""[..]));
+    let from_source = s2(&[path.to_str().unwrap(), "a", "b"]);
+    let compiled = s2(&[out.to_str().unwrap(), "a", "b"]);
+    assert_eq!(String::from_utf8_lossy(&compiled.stdout), "(a b)\n");
+    assert_eq!((compiled.status.code(), &compiled.stdout, &compiled.stderr), (from_source.status.code(), &from_source.stdout, &from_source.stderr));
+    assert_eq!(compiled.status.code(), Some(70));
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&out).ok();
+}
+
+#[test]
+fn library_files_are_cached_until_they_change() {
+    let dir = std::env::temp_dir().join(format!("s2-cache-test-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("cachetest")).unwrap();
+    let lib = dir.join("cachetest").join("m.sld");
+    let cache = lib.with_extension("s2o");
+    let define = |v: u32| {
+        let text = format!("(define-library (cachetest m) (export v) (import (scheme base)) (begin (define v {})))", v);
+        std::fs::write(&lib, text).unwrap();
+    };
+    let program = script("cache", "(import (scheme write) (cachetest m)) (display v)");
+    let run = || s2_with_libs(&[program.to_str().unwrap()], &dir);
+    define(1);
+    assert_eq!(run(), (0, "1".into()));
+    let first = std::fs::metadata(&cache).unwrap().modified().unwrap();
+    assert_eq!(run(), (0, "1".into()));
+    assert_eq!(std::fs::metadata(&cache).unwrap().modified().unwrap(), first, "the cache is used, not rewritten");
+    define(2);
+    assert_eq!(run(), (0, "2".into()), "a changed library is compiled again");
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_file(&program).ok();
+}

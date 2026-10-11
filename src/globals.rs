@@ -54,6 +54,9 @@ pub struct Env {
     /// False for the environments `environment` makes: they can't be
     /// defined in, assigned to or imported into.
     pub mutable: bool,
+    /// While a file is compiled ahead (`fasl.rs`): every identifier whose
+    /// binding changed, so the compiled file can make the same changes.
+    pub touched: Option<Vec<GcRef>>,
 }
 
 /// The `Env` of an `Obj::Environment`.
@@ -67,7 +70,7 @@ pub fn env_of<'a>(env: GcRef) -> &'a std::cell::RefCell<Env> {
 impl Env {
     /// An empty environment: a library's, before its imports.
     pub fn empty(mutable: bool) -> Env {
-        Env { bindings: FxHashMap::default(), mutable }
+        Env { bindings: FxHashMap::default(), mutable, touched: None }
     }
 
     /// The system environment's start: the core forms.
@@ -105,7 +108,7 @@ impl Env {
             _ => {
                 let cell = heap.global(name);
                 if self.mutable {
-                    self.bindings.insert(name, (TopBinding::Variable(cell), false));
+                    self.bind(name, TopBinding::Variable(cell), false);
                 }
                 cell
             }
@@ -119,14 +122,7 @@ impl Env {
         if !self.mutable {
             return Err("define: this environment is immutable".into());
         }
-        match self.bindings.get(&name) {
-            Some(&(TopBinding::Variable(cell), false)) => Ok(cell),
-            _ => {
-                let cell = heap.global(name);
-                self.bindings.insert(name, (TopBinding::Variable(cell), false));
-                Ok(cell)
-            }
-        }
+        Ok(self.own_cell(heap, name, true).unwrap())
     }
 
     /// The cell `set!` of the global `name` assigns. Assigning an imported
@@ -143,14 +139,41 @@ impl Env {
         if !self.mutable {
             return Err("define-syntax: this environment is immutable".into());
         }
-        self.bindings.insert(name, (TopBinding::Macro(m), false));
+        self.bind(name, TopBinding::Macro(m), false);
         Ok(())
     }
 
     /// Bind `name` to `binding`, as `import` does. It replaces any binding
     /// `name` had.
     pub fn import(&mut self, name: GcRef, binding: TopBinding) {
-        self.bindings.insert(name, (binding, true));
+        self.bind(name, binding, true);
+    }
+
+    /// Bind `name`, replacing any binding it had.
+    pub fn bind(&mut self, name: GcRef, binding: TopBinding, imported: bool) {
+        if let Some(touched) = &mut self.touched {
+            touched.push(name);
+        }
+        self.bindings.insert(name, (binding, imported));
+    }
+
+    /// `name`'s binding, and whether it was imported.
+    pub fn entry(&self, name: GcRef) -> Option<(TopBinding, bool)> {
+        self.bindings.get(&name).copied()
+    }
+
+    /// The cell of the variable `name` defines here (not one it imports).
+    /// If there is none, `create` makes one, replacing any other binding.
+    pub fn own_cell(&mut self, heap: &mut Heap, name: GcRef, create: bool) -> Option<GcRef> {
+        match self.bindings.get(&name) {
+            Some(&(TopBinding::Variable(cell), false)) => Some(cell),
+            _ if create => {
+                let cell = heap.global(name);
+                self.bind(name, TopBinding::Variable(cell), false);
+                Some(cell)
+            }
+            _ => None,
+        }
     }
 
     /// What the GC must keep: every key (aliases among them) and every

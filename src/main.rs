@@ -9,6 +9,10 @@
 //!                             reported and the next form runs
 //! s2 [FLAGS] PROGRAM ARG ...  run a program: the first error ends it, with
 //!                             status 70; (command-line) is PROGRAM ARG ...
+//!                             PROGRAM may be source or compiled
+//! s2 --compile FILE [-o OUT]  compile the program FILE to OUT (by default
+//!                             FILE with the extension .s2o), without
+//!                             running it
 //! ```
 //!
 //! Flags: `--expand` prints each form's core AST (after macro expansion),
@@ -16,6 +20,7 @@
 
 mod builtins;
 mod compile;
+mod fasl;
 mod globals;
 // ponytail: the forked and foundation modules carry API that later phases
 // use (ports in P6, the GC mark in P3). Remove these allows as the callers
@@ -35,6 +40,7 @@ mod value;
 mod vm;
 
 use std::io::{IsTerminal, Write};
+use std::path::Path;
 
 /// The global allocator: mimalloc, as in s1, so benchmarks against s1
 /// compare like with like.
@@ -73,12 +79,7 @@ impl Session {
         heap.interaction = Some(system);
         let vm = vm::Vm::new(&mut heap);
         let mut s = Session { heap, env: system, vm, dis: false, expand: false };
-        let mut port = io::new_string_port_input(CORE_SCM);
-        while let Ok(datum) = parse(&mut s.heap, &mut port) {
-            if let Err(e) = s.eval(datum) {
-                panic!("scheme/core.scm: {}", e);
-            }
-        }
+        s.load_core();
         libraries::register_standard_libraries(&mut s.heap, system);
         // The interaction environment: every system binding, imported
         // (globals.rs).
@@ -92,12 +93,70 @@ impl Session {
         s
     }
 
-    /// Compile one top-level form and run it. If it imports a library
-    /// whose file hasn't been loaded, load the file and try again.
+    /// Load `scheme/core.scm` into the system environment: from its
+    /// compiled image, cached next to the executable, if that is fresh;
+    /// otherwise compile and run it form by form, and write the image for
+    /// next time (plan/04 P11).
+    fn load_core(&mut self) {
+        let system = self.env;
+        let image = std::env::current_exe().map(|exe| exe.with_file_name("s2-core.s2o")).ok();
+        let cached = image.as_deref().and_then(|p| fasl::read_cached(&mut self.heap, system, p).ok().flatten());
+        let result = match cached {
+            Some(templates) => self.run_templates(&templates),
+            None => {
+                env_of(system).borrow_mut().touched = Some(Vec::new());
+                let mut templates = Vec::new();
+                let mut port = io::new_string_port_input(CORE_SCM);
+                let pinned = self.heap.pinned.len();
+                let mut result = Ok(());
+                while let Ok(datum) = parse(&mut self.heap, &mut port) {
+                    result = self.expand(datum).and_then(|ast| {
+                        let t = compile::codegen::codegen(&mut self.heap, &ast);
+                        templates.push(t);
+                        self.heap.pinned.push(Value::obj(t));
+                        self.vm.run(&mut self.heap, t).map(|_| ())
+                    });
+                    if result.is_err() {
+                        break;
+                    }
+                }
+                if let (Ok(()), Some(image)) = (&result, image)
+                    && let Ok(bytes) = fasl::write(&self.heap, system, &templates, &[])
+                {
+                    fasl::write_cache(&image, &bytes);
+                }
+                self.heap.pinned.truncate(pinned);
+                env_of(system).borrow_mut().touched = None;
+                result
+            }
+        };
+        if let Err(e) = result {
+            panic!("scheme/core.scm: {}", e);
+        }
+    }
+
+    /// Run compiled forms in order. The forms not run yet wait through the
+    /// collections of those that are.
+    fn run_templates(&mut self, templates: &[GcRef]) -> Result<(), String> {
+        let pinned = self.heap.pinned.len();
+        self.heap.pinned.extend(templates.iter().map(|&t| Value::obj(t)));
+        let result = templates.iter().try_for_each(|&t| self.vm.run(&mut self.heap, t).map(|_| ()));
+        self.heap.pinned.truncate(pinned);
+        result
+    }
+
+    /// Compile one top-level form and run it.
     fn eval(&mut self, datum: Value) -> Result<Value, String> {
+        let ast = self.expand(datum)?;
+        self.run(&ast)
+    }
+
+    /// Expand one top-level form. If it imports a library whose file
+    /// hasn't been loaded, load the file and try again.
+    fn expand(&mut self, datum: Value) -> Result<compile::ast::Expr, String> {
         loop {
             match compile::expand::expand(&mut self.heap, self.env, datum) {
-                Ok(ast) => return self.run(&ast),
+                Ok(ast) => return Ok(ast),
                 Err(e) => match self.heap.libraries.pending_load.take() {
                     Some(path) => {
                         // The form waits through the load's collections.
@@ -187,35 +246,99 @@ impl Session {
     /// program can be a script.
     fn run_program(&mut self, args: &[String]) -> ! {
         builtins::set_command_line(args.to_vec());
-        let text = match std::fs::read_to_string(&args[0]) {
-            Ok(text) => text,
-            Err(e) => {
-                eprintln!("s2: {}: {}", args[0], e);
-                std::process::exit(EXIT_ERROR);
-            }
-        };
-        let text = match text.strip_prefix("#!") {
-            Some(rest) if !rest.starts_with("fold-case") && !rest.starts_with("no-fold-case") => {
-                rest.find('\n').map_or("", |i| &rest[i..]).to_string()
-            }
-            _ => text,
-        };
-        let mut port = io::new_string_port_input(&text);
-        loop {
-            let result = match parse(&mut self.heap, &mut port) {
-                Ok(datum) => self.eval(datum),
-                Err(ParseError::Eof) => break,
-                Err(ParseError::Syntax(msg)) => Err(msg),
-            };
-            if let Err(msg) = result {
+        let bytes = std::fs::read(&args[0]).unwrap_or_else(|e| {
+            eprintln!("s2: {}: {}", args[0], e);
+            std::process::exit(EXIT_ERROR);
+        });
+        if fasl::is_fasl(&bytes) {
+            if let Err(msg) = self.run_compiled(&bytes) {
                 self.report(&msg);
                 std::process::exit(EXIT_ERROR);
+            }
+        } else {
+            let mut port = io::new_string_port_input(&program_text(bytes));
+            loop {
+                let result = match parse(&mut self.heap, &mut port) {
+                    Ok(datum) => self.eval(datum),
+                    Err(ParseError::Eof) => break,
+                    Err(ParseError::Syntax(msg)) => Err(msg),
+                };
+                if let Err(msg) = result {
+                    self.report(&msg);
+                    std::process::exit(EXIT_ERROR);
+                }
             }
         }
         std::io::stdout().flush().ok();
         #[cfg(feature = "stats")]
         vm::stats::report();
         std::process::exit(0)
+    }
+
+    /// Run a compiled program: load it, loading the libraries it needs
+    /// first, then run its forms' code in order.
+    fn run_compiled(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let templates = loop {
+            match fasl::read(&mut self.heap, self.env, bytes) {
+                Ok(templates) => break templates,
+                Err(e) => match self.heap.libraries.pending_load.take() {
+                    Some(path) => self.load_library(&path).map(|_| ())?,
+                    None => return Err(e),
+                },
+            }
+        };
+        self.run_templates(&templates)
+    }
+
+    /// Compile the program `file` to a compiled file, without running it.
+    /// Its forms are expanded in order in the interaction environment, as
+    /// they would be when it runs; libraries it imports are loaded, and
+    /// those it defines are registered.
+    fn compile_file(&mut self, file: &str) -> Result<Vec<u8>, String> {
+        let bytes = std::fs::read(file).map_err(|e| format!("{}: {}", file, e))?;
+        let mut port = io::new_string_port_input(&program_text(bytes));
+        env_of(self.env).borrow_mut().touched = Some(Vec::new());
+        let pinned = self.heap.pinned.len();
+        let mut templates = Vec::new();
+        let result = loop {
+            let datum = match parse(&mut self.heap, &mut port) {
+                Ok(datum) => datum,
+                Err(ParseError::Eof) => break fasl::write(&self.heap, self.env, &templates, &[file.into()]),
+                Err(ParseError::Syntax(msg)) => break Err(msg),
+            };
+            match self.expand(datum) {
+                Ok(ast) => {
+                    let t = compile::codegen::codegen(&mut self.heap, &ast);
+                    self.heap.pinned.push(Value::obj(t));
+                    templates.push(t);
+                    // A library the program defines is registered now, so the
+                    // forms after it can import it, as one loaded from a file
+                    // would be.
+                    let head = heap::list_to_vec(datum).and_then(|f| f.first().copied());
+                    if head.is_some_and(|h| h.eq(self.heap.intern("define-library")))
+                        && let Err(e) = self.vm.run(&mut self.heap, t)
+                    {
+                        break Err(e);
+                    }
+                }
+                Err(e) => break Err(e),
+            }
+        };
+        self.heap.pinned.truncate(pinned);
+        env_of(self.env).borrow_mut().touched = None;
+        result
+    }
+}
+
+/// A program's text: `#!` at the start begins a line that is skipped, so a
+/// program can be a script (but `#!fold-case` is a reader directive).
+fn program_text(bytes: Vec<u8>) -> String {
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    match text.strip_prefix("#!") {
+        Some(rest) if !rest.starts_with("fold-case") && !rest.starts_with("no-fold-case") => {
+            rest.find('\n').map_or("", |i| &rest[i..]).to_string()
+        }
+        _ => text,
     }
 }
 
@@ -224,8 +347,19 @@ impl Session {
 const EXIT_ERROR: i32 = 70;
 
 fn usage() -> ! {
-    eprintln!("usage: s2 [--expand] [--dis] [-e TEXT | -f FILE | PROGRAM [ARG ...]]");
+    eprintln!("usage: s2 [--expand] [--dis] [-e TEXT | -f FILE | PROGRAM [ARG ...] | --compile FILE [-o OUT]]");
     std::process::exit(2);
+}
+
+/// `s2 --compile`: report an error, or write the compiled file.
+fn compile_to(session: &mut Session, file: &str, out: &Path) -> bool {
+    match session.compile_file(file).and_then(|bytes| std::fs::write(out, bytes).map_err(|e| format!("{}: {}", out.display(), e))) {
+        Ok(()) => true,
+        Err(msg) => {
+            session.report(&msg);
+            false
+        }
+    }
 }
 
 /// The stack size of the thread s2 runs on. The expander, analysis and
@@ -268,6 +402,8 @@ fn run_main() {
                 false
             }
         },
+        [flag, file] if flag == "--compile" => compile_to(&mut session, file, &Path::new(file).with_extension("s2o")),
+        [flag, file, o, out] if flag == "--compile" && o == "-o" => compile_to(&mut session, file, Path::new(out)),
         [file, ..] if !file.starts_with('-') => session.run_program(&args),
         _ => usage(),
     };
@@ -285,9 +421,17 @@ mod tests {
     /// The collector runs at every safepoint and poisons what it frees, so
     /// every result test is also a GC test.
     fn run(src: &str) -> Vec<String> {
+        run_in(&mut stressed_session(), src)
+    }
+
+    fn stressed_session() -> Session {
         let mut s = Session::new();
         s.heap.stress = true;
         s.heap.poison = true;
+        s
+    }
+
+    fn run_in(s: &mut Session, src: &str) -> Vec<String> {
         let mut port = io::new_string_port_input(src);
         let mut out = Vec::new();
         loop {
@@ -643,6 +787,64 @@ mod tests {
               &["", "", "", "1", "error: set!: n is imported and can't be assigned", "n", "mine"]);
         check("(define (f) (import (scheme base))) (cond-expand ((and r7rs (not no-such)) 'yes))",
               &["error: import: only allowed at top level", "yes"]);
+    }
+
+    /// Compile `program` ahead, as `s2 --compile` does, load the compiled
+    /// file into a new session and run it, then evaluate `checks` there.
+    fn run_compiled(program: &str, checks: &str) -> Result<Vec<String>, String> {
+        let path = std::env::temp_dir().join(format!("s2-fasl-test-{}-{}.scm", std::process::id(), program.len()));
+        std::fs::write(&path, program).unwrap();
+        let bytes = Session::new().compile_file(path.to_str().unwrap());
+        std::fs::remove_file(&path).ok();
+        let mut s = stressed_session();
+        s.run_compiled(&bytes?)?;
+        Ok(run_in(&mut s, checks))
+    }
+
+    #[test]
+    fn compiled_files() {
+        let program = r#"
+            (import (tests libs greet))
+            (define-record-type point (make-point x y) point? (x point-x) (y point-y set-point-y!))
+            (define-syntax swap! (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp)))))
+            (define data '(1 -2 1152921504606846976 1/3 2.5 #\x "s" #(1 #u8(2 3)) sym () #t))
+            (define (first x) (car x))
+            (define (car x) 'mine)
+            (define counter 0)
+            (define (count!) (set! counter (+ counter 1)) counter)
+            (define (fact n) (let loop ((n n) (acc 1)) (if (= n 0) acc (loop (- n 1) (* acc n)))))
+            (define p (make-point 1 2))
+            (set-point-y! p 5)"#;
+        // Every kind of constant; a library file's import; a record type's
+        // hidden definitions, keyed by aliases; a macro, there for code
+        // compiled after the file is loaded; `car` before and after the file
+        // defines its own.
+        let checks = r#"data (greet "x") (point-y p) (point? p) (let ((a 1) (b 2)) (swap! a b) (list a b))
+                        (first '(1 2)) (car '(1)) (count!) (count!) (fact 20)"#;
+        assert_eq!(
+            run_compiled(program, checks).unwrap(),
+            [
+                r#"(1 -2 1152921504606846976 1/3 2.5 #\x "s" #(1 #u8(2 3)) sym () #t)"#,
+                r#""hello, x""#, "5", "#t", "(2 1)", "1", "mine", "1", "2", "2432902008176640000",
+            ]
+        );
+        assert_eq!(run_compiled("(define c '#0=(a . #0#))", "").unwrap_err(), "can't compile a circular constant: #0=(a . #0#)");
+    }
+
+    #[test]
+    fn damaged_compiled_files() {
+        let path = std::env::temp_dir().join(format!("s2-fasl-damaged-{}.scm", std::process::id()));
+        std::fs::write(&path, r#"(define (f x) (list x 'a "b" 1.5)) (f 1)"#).unwrap();
+        let bytes = Session::new().compile_file(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).ok();
+        // Every truncation is an error, not a crash.
+        let mut s = Session::new();
+        for n in 0..bytes.len() {
+            assert!(fasl::read(&mut s.heap, s.env, &bytes[..n]).is_err(), "{} bytes", n);
+        }
+        let mut other = bytes.clone();
+        other[8] = 99;
+        assert_eq!(fasl::read(&mut s.heap, s.env, &other).unwrap_err(), "compiled file is version 99, and this s2 reads version 1: compile it again");
     }
 
     #[test]

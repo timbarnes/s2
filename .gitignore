@@ -1,3 +1,4 @@
 /target
 .DS_Store
 tests/r7rs/last-run.log
+*.s2o
