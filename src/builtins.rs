@@ -11,7 +11,10 @@
 //! procedure values, but called with the VM's context.
 //!
 //! ponytail: P1's arithmetic takes fixnums only (results may be bignums).
-//! P6 replaces it with s1's numeric tower.
+//! P6 replaces it with s1's numeric tower. The list and equivalence
+//! procedures here are the few that P5's derived syntax (`case` needs
+//! `memv`, quasiquote `append` and `list->vector`) and its tests need; P6
+//! ports the rest from s1.
 
 use std::io::Write;
 
@@ -19,7 +22,7 @@ use num_bigint::BigInt;
 
 use crate::compile;
 use crate::globals::Env;
-use crate::heap::{Heap, Obj};
+use crate::heap::{Heap, Obj, eqv, equal, list_to_vec};
 use crate::printer::{display_value, print_value};
 use crate::value::Value;
 use crate::vm::Vm;
@@ -65,6 +68,17 @@ static PRIMITIVES: &[Primitive] = &[
     prim("car", 1, Some(1), |_, a| pair(a[0], "car").map(|(car, _)| car)),
     prim("cdr", 1, Some(1), |_, a| pair(a[0], "cdr").map(|(_, cdr)| cdr)),
     prim("cons", 2, Some(2), |h, a| Ok(h.cons(a[0], a[1]))),
+    prim("eq?", 2, Some(2), |_, a| Ok(Value::bool(a[0].eq(a[1])))),
+    prim("eqv?", 2, Some(2), |_, a| Ok(Value::bool(eqv(a[0], a[1])))),
+    prim("equal?", 2, Some(2), |_, a| Ok(Value::bool(equal(a[0], a[1])))),
+    prim("not", 1, Some(1), |_, a| Ok(Value::bool(!a[0].is_true()))),
+    prim("null?", 1, Some(1), |_, a| Ok(Value::bool(a[0].is_nil()))),
+    prim("pair?", 1, Some(1), |_, a| Ok(Value::bool(pair(a[0], "").is_ok()))),
+    prim("list", 0, None, |h, a| Ok(h.list(a.to_vec()))),
+    prim("vector", 0, None, |h, a| Ok(h.vector(a.to_vec()))),
+    prim("memv", 2, Some(2), memv),
+    prim("append", 0, None, append),
+    prim("list->vector", 1, Some(1), |h, a| Ok(h.vector(proper_list(a[0], "list->vector")?))),
     prim("display", 1, Some(1), display),
     prim("newline", 0, Some(0), newline),
     vm_prim("dis", 1, Some(1), dis),
@@ -136,6 +150,32 @@ fn pair(v: Value, who: &str) -> Result<(Value, Value), String> {
         Some(Obj::Pair { car, cdr }) => Ok((car.get(), cdr.get())),
         _ => Err(format!("{}: not a pair: {}", who, print_value(v))),
     }
+}
+
+fn proper_list(v: Value, who: &str) -> Result<Vec<Value>, String> {
+    list_to_vec(v).ok_or_else(|| format!("{}: not a proper list: {}", who, print_value(v)))
+}
+
+/// The first tail of the list whose car is `eqv?` to the item, or `#f`.
+fn memv(_: &mut Heap, args: &[Value]) -> Result<Value, String> {
+    let mut list = args[1];
+    while let Ok((car, cdr)) = pair(list, "memv") {
+        if eqv(car, args[0]) {
+            return Ok(list);
+        }
+        list = cdr;
+    }
+    Ok(Value::FALSE)
+}
+
+/// The lists appended; the last argument is shared, not copied.
+fn append(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+    let Some((&last, init)) = args.split_last() else { return Ok(Value::NIL) };
+    let mut items = Vec::new();
+    for &list in init {
+        items.extend(proper_list(list, "append")?);
+    }
+    Ok(items.into_iter().rev().fold(last, |tail, v| heap.cons(v, tail)))
 }
 
 fn display(_: &mut Heap, args: &[Value]) -> Result<Value, String> {

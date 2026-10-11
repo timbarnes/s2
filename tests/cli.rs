@@ -70,6 +70,13 @@ fn dis_prints_code_without_running_it() {
 }
 
 #[test]
+fn expand_prints_the_core_ast() {
+    let o = s2(&["--expand", "-e", "(let ((x 1)) (and x 2))"], "");
+    assert!(o.status.success());
+    assert_eq!(stdout(&o), "(let ((x.1 1)) (if x.1 2 #f))\n2\n");
+}
+
+#[test]
 fn bad_usage() {
     assert_eq!(s2(&["-x"], "").status.code(), Some(2));
 }

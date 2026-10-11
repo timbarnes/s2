@@ -31,6 +31,7 @@ use num_traits::{One, ToPrimitive};
 use rustc_hash::FxHashMap;
 
 use crate::builtins::Primitive;
+use crate::compile::syntax_rules::SyntaxRules;
 use crate::sstring::SString;
 use crate::value::Value;
 use crate::vm::Template;
@@ -72,6 +73,15 @@ pub enum Obj {
     /// A top-level binding cell (D7): a global variable. Holds
     /// `Value::UNDEFINED` until the variable is defined.
     Global { name: GcRef, value: Cell<Value> },
+    /// An identifier introduced by a macro expansion (plan/03 §12): it
+    /// renames `original` (a symbol, or another alias), and if nothing in
+    /// the expansion binds it, it means what `original` meant where the
+    /// macro was defined: in the first `depth` of the expander's scope
+    /// frames (0 for a top-level macro). Prints as its symbol's name.
+    Alias { original: Value, depth: u32 },
+    /// A `syntax-rules` transformer, bound by `define-syntax`,
+    /// `let-syntax` or `letrec-syntax`. Exists only at compile time.
+    Macro(SyntaxRules),
     /// A variable that is both captured and assigned, or used before its
     /// `letrec` init has run (03 §7, `analyze::boxed_variables`). Closures
     /// copy the box, so they share the variable. Never seen by Scheme code.
@@ -243,6 +253,14 @@ impl Heap {
         self.alloc(Obj::Template(t)).as_ref().unwrap()
     }
 
+    pub fn alias(&mut self, original: Value, depth: u32) -> Value {
+        self.alloc(Obj::Alias { original, depth })
+    }
+
+    pub fn make_macro(&mut self, rules: SyntaxRules) -> GcRef {
+        self.alloc(Obj::Macro(rules)).as_ref().unwrap()
+    }
+
     pub fn make_box(&mut self, v: Value) -> Value {
         self.alloc(Obj::Box(Cell::new(v)))
     }
@@ -292,6 +310,14 @@ impl Marker {
                 }
                 Obj::Vector(items) => items.iter().for_each(|c| self.value(c.get())),
                 Obj::Box(value) => self.value(value.get()),
+                Obj::Alias { original, .. } => self.value(*original),
+                Obj::Macro(m) => {
+                    m.ellipsis.iter().chain(&m.literals).for_each(|&r| self.obj(r));
+                    m.rules.iter().for_each(|&(p, t)| {
+                        self.value(p);
+                        self.value(t);
+                    });
+                }
                 Obj::Global { name, value } => {
                     self.obj(*name);
                     self.value(value.get());
@@ -304,6 +330,37 @@ impl Marker {
                 Obj::Symbol(_) | Obj::Str(_) | Obj::Bytevector(_) | Obj::BigInt(_) | Obj::Rational(_) | Obj::Primitive(_) => {}
             }
         }
+    }
+}
+
+/// `eqv?`: `eq?`, or numbers with the same exactness and value.
+pub fn eqv(a: Value, b: Value) -> bool {
+    a.eq(b)
+        || match (a.as_obj().map(|o| &o.kind), b.as_obj().map(|o| &o.kind)) {
+            (Some(Obj::BigInt(x)), Some(Obj::BigInt(y))) => x == y,
+            (Some(Obj::Rational(x)), Some(Obj::Rational(y))) => x == y,
+            _ => false,
+        }
+}
+
+/// `equal?`: `eqv?`, or pairs, strings, vectors and bytevectors with equal
+/// contents.
+// ponytail: recursive, and loops on cyclic data. R7RS requires equal? to
+// terminate on cycles; P6 does that when it ports s1's equal?.
+pub fn equal(a: Value, b: Value) -> bool {
+    if eqv(a, b) {
+        return true;
+    }
+    match (a.as_obj().map(|o| &o.kind), b.as_obj().map(|o| &o.kind)) {
+        (Some(Obj::Pair { car: a1, cdr: a2 }), Some(Obj::Pair { car: b1, cdr: b2 })) => {
+            equal(a1.get(), b1.get()) && equal(a2.get(), b2.get())
+        }
+        (Some(Obj::Str(x)), Some(Obj::Str(y))) => *x.borrow() == *y.borrow(),
+        (Some(Obj::Vector(x)), Some(Obj::Vector(y))) => {
+            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| equal(p.get(), q.get()))
+        }
+        (Some(Obj::Bytevector(x)), Some(Obj::Bytevector(y))) => x == y,
+        _ => false,
     }
 }
 

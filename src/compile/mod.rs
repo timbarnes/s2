@@ -5,6 +5,7 @@ pub mod ast;
 pub mod codegen;
 pub mod disasm;
 pub mod expand;
+pub mod syntax_rules;
 
 use crate::globals::Env;
 use crate::heap::{GcRef, Heap};

@@ -1,0 +1,5 @@
+# Test threads get the same large stack as the s2 binary's session thread
+# (src/main.rs, STACK_SIZE): expansion and code generation recurse over
+# deeply nested code.
+[env]
+RUST_MIN_STACK = "1073741824"

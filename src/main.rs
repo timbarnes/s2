@@ -3,12 +3,13 @@
 //! Usage:
 //!
 //! ```text
-//! s2 [--dis]            REPL on standard input
-//! s2 [--dis] -e TEXT    evaluate each form in TEXT, writing each result
-//! s2 [--dis] FILE       run a program; results are not written
+//! s2 [FLAGS]            REPL on standard input
+//! s2 [FLAGS] -e TEXT    evaluate each form in TEXT, writing each result
+//! s2 [FLAGS] FILE       run a program; results are not written
 //! ```
 //!
-//! `--dis` prints each form's compiled code before running it.
+//! Flags: `--expand` prints each form's core AST (after macro expansion),
+//! and `--dis` its compiled code, before running it.
 
 mod builtins;
 mod compile;
@@ -42,25 +43,41 @@ use io::PortKind;
 use reader::{ParseError, parse};
 use value::Value;
 
+/// The derived syntax (`cond`, `case`, `and`, `do`, …) as `syntax-rules`
+/// macros, compiled into the binary and loaded into every session.
+const CORE_SCM: &str = include_str!("../scheme/core.scm");
+
 /// One top-level environment and its heap.
 struct Session {
     heap: Heap,
     env: Env,
     vm: vm::Vm,
     dis: bool,
+    expand: bool,
 }
 
 impl Session {
-    fn new(dis: bool) -> Session {
+    fn new() -> Session {
         let mut heap = Heap::new();
-        let mut env = Env::default();
+        let mut env = Env::new(&mut heap);
         builtins::install(&mut heap, &mut env);
-        Session { heap, env, vm: vm::Vm::default(), dis }
+        let mut s = Session { heap, env, vm: vm::Vm::default(), dis: false, expand: false };
+        let mut port = io::new_string_port_input(CORE_SCM);
+        while let Ok(datum) = parse(&mut s.heap, &mut port) {
+            if let Err(e) = s.eval(datum) {
+                panic!("scheme/core.scm: {}", e);
+            }
+        }
+        s
     }
 
     /// Compile one top-level form and run it.
     fn eval(&mut self, datum: Value) -> Result<Value, String> {
-        let template = compile::compile(&mut self.heap, &mut self.env, datum)?;
+        let ast = compile::expand::expand(&mut self.heap, &mut self.env, datum)?;
+        if self.expand {
+            println!("{}", compile::ast::show(&ast));
+        }
+        let template = compile::codegen::codegen(&mut self.heap, &ast);
         if self.dis {
             print!("{}", compile::disasm::disassemble(template));
         }
@@ -96,17 +113,33 @@ impl Session {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: s2 [--dis] [-e TEXT | FILE]");
+    eprintln!("usage: s2 [--expand] [--dis] [-e TEXT | FILE]");
     std::process::exit(2);
 }
 
+/// The stack size of the thread s2 runs on. The expander, analysis and
+/// code generation recurse over the code, and deeply nested code (a long
+/// `or`, a `cond` with many clauses, which macros turn into nesting) needs
+/// a deep stack: in a debug build, over 10KB per level. This is address
+/// space, used only as deep as the code goes.
+const STACK_SIZE: usize = 1 << 30;
+
 fn main() {
+    let session = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(run_main).unwrap();
+    session.join().unwrap();
+}
+
+fn run_main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let dis = args.first().is_some_and(|a| a == "--dis");
-    if dis {
+    let mut session = Session::new();
+    while let Some(flag) = args.first() {
+        match flag.as_str() {
+            "--dis" => session.dis = true,
+            "--expand" => session.expand = true,
+            _ => break,
+        }
         args.remove(0);
     }
-    let mut session = Session::new(dis);
     let ok = match args.as_slice() {
         [] => {
             let prompt = std::io::stdin().is_terminal();
@@ -138,7 +171,7 @@ mod tests {
     /// The collector runs at every safepoint and poisons what it frees, so
     /// every result test is also a GC test.
     fn run(src: &str) -> Vec<String> {
-        let mut s = Session::new(false);
+        let mut s = Session::new();
         s.heap.stress = true;
         s.heap.poison = true;
         let mut port = io::new_string_port_input(src);
@@ -302,9 +335,130 @@ mod tests {
               &["error: let: bad syntax: (let loop)", "error: let: duplicate variable: x"]);
     }
 
+    /// s1's `syntax_rules_tests.scm`, the cases that need only P5.
+    #[test]
+    fn hygiene() {
+        let swap = "(define-syntax swap! (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp)))))";
+        check(&format!("{} (let ((x 1) (y 2)) (swap! x y) (list x y))", swap), &["swap!", "(2 1)"]);
+        // The template's tmp doesn't capture the user's.
+        check(&format!("{} (let ((tmp 1) (other 2)) (swap! tmp other) (list tmp other))", swap), &["swap!", "(2 1)"]);
+        // A template's keywords mean what they meant where the macro was defined.
+        check("(define-syntax my-if (syntax-rules () ((_ c t e) (cond (c t) (else e)))))
+               (let ((else #f) (cond 'shadowed)) (my-if #t 'yes 'no))", &["my-if", "yes"]);
+        check("(let ((x 'outer)) (let-syntax ((m (syntax-rules () ((m) x)))) (let ((x 'inner)) (m))))", &["outer"]);
+        check("(let-syntax ((when (syntax-rules () ((_ test s1 s2 ...) (if test (begin s1 s2 ...))))))
+                 (let ((if #t)) (when if (set! if 'now)) if))", &["now"]);
+        // A recursive macro whose temporaries and keywords the user shadows.
+        check("(define-syntax my-or (syntax-rules () ((_) #f) ((_ e) e) ((_ e1 e2 ...) (let ((temp e1)) (if temp temp (my-or e2 ...))))))
+               (let ((x #f) (y 7) (temp 8) (let null?) (if pair?)) (my-or x (let temp) (if y) y))", &["my-or", "7"]);
+        // Literals match by binding: a local => is a variable.
+        check("(define-syntax arrow (syntax-rules (=>) ((_ a => b) 'arrow) ((_ a b c) 'plain)))
+               (arrow 1 => 2) (let ((=> 0)) (arrow 1 => 2)) (let ((=> #f)) (cond (#t => 'ok)))",
+              &["arrow", "arrow", "plain", "ok"]);
+        check("(let ((else #f)) (cond (else 1) (#t 2)))", &["2"]);
+        // set! through an alias assigns the definition scope's variable.
+        check("(define counter 0) (define-syntax bump! (syntax-rules () ((_) (set! counter (+ counter 1)))))
+               (let ((counter 'shadowed)) (bump!) (bump!) counter) counter",
+              &["counter", "bump!", "shadowed", "2"]);
+        // Quoted template data is plain symbols.
+        check("(define-syntax quoted (syntax-rules () ((_ x) '(a x #(b c))))) (quoted 1) (eq? (car (quoted 1)) 'a)",
+              &["quoted", "(a 1 #(b c))", "#t"]);
+        check("(define-syntax qq (syntax-rules () ((_ e) `(tag ,e ,(list 'x e))))) (qq 5)", &["qq", "(tag 5 (x 5))"]);
+    }
+
+    #[test]
+    fn macro_defining_macros_and_scope() {
+        check("(define-syntax be-like-begin (syntax-rules () ((_ name) (define-syntax name (syntax-rules () ((name expr (... ...)) (begin expr (... ...))))))))
+               (be-like-begin sequence) (sequence 0 1 2 3)", &["be-like-begin", "sequence", "3"]);
+        check("(define-syntax bld (syntax-rules () ((_ name) (define-syntax name (syntax-rules dots () ((name expr dots) (begin expr dots)))))))
+               (bld seq) (seq 2 3 4 5)", &["bld", "seq", "5"]);
+        // An introduced top-level definition is visible to the macro the
+        // same expansion defines, and hidden from everything else.
+        check("(define-syntax jabberwocky (syntax-rules () ((_ hatter) (begin (define march-hare 42) (define-syntax hatter (syntax-rules () ((_) march-hare)))))))
+               (jabberwocky mad-hatter) (mad-hatter) march-hare",
+              &["jabberwocky", "mad-hatter", "42", "error: unbound variable: march-hare"]);
+        check("(let ((x 1) (y 2)) (define-syntax local-swap! (syntax-rules () ((_ a b) (let ((t a)) (set! a b) (set! b t))))) (local-swap! x y) (list x y))",
+              &["(2 1)"]);
+        check("(let () (define x 1) (let-syntax () (define x 2) #f) x)", &["1"]);
+        // A macro in a body can refer to a procedure defined after it.
+        check("(let () (define-syntax fwd (syntax-rules () ((_) (later)))) (define (use) (fwd)) (define (later) 42) (use))", &["42"]);
+        // A macro use that expands into definitions, and begin splicing.
+        check("(define-syntax def2 (syntax-rules () ((_ a b v) (begin (define a v) (define b v)))))
+               (let () (def2 p q 5) (begin (define r 1)) (+ p q r))", &["def2", "11"]);
+        // Transformers that refer to each other. (Expansion doesn't run the
+        // `if`s, so they can't recurse into each other forever.)
+        check("(letrec-syntax ((ev? (syntax-rules () ((_ n) (if (= n 0) #t (od? (- n 1))))))
+                               (od? (syntax-rules () ((_ n) (not (= n 0))))))
+                 (list (ev? 4) (od? 0)))", &["(#t #f)"]);
+        // Redefining a macro, and a core form, as variables.
+        check("(define-syntax m (syntax-rules () ((_) 1))) (define m 2) m (define (if x) x) (if 5)", &["m", "m", "2", "if", "5"]);
+    }
+
+    #[test]
+    fn derived_forms() {
+        check("(and) (and 1 2) (and 1 #f 3) (or) (or #f 2) (or #f #f)", &["#t", "2", "#f", "#f", "2", "#f"]);
+        check("(when #t 1 2) (when #f 1) (unless #f 3) (unless #t 3)", &["2", "", "3", ""]);
+        check("(let* ((a 1) (b (+ a 1))) (list a b)) (let* () 5)", &["(1 2)", "5"]);
+        check("(cond (#f 1) ((+ 1 1) => (lambda (x) (* x 10))) (else 3)) (cond ((car '(7)))) (cond (#f 1))",
+              &["20", "7", ""]);
+        check("(case (* 2 3) ((2 3 5 7) 'prime) ((1 4 6 8 9) 'composite)) (case 3 ((3) => (lambda (x) (+ x 1))) (else 'b)) (case 'z ((a) 1) (else => (lambda (x) x)))",
+              &["composite", "4", "z"]);
+        check("(do ((i 0 (+ i 1)) (acc '() (cons i acc))) ((= i 3) acc))", &["(2 1 0)"]);
+        // do's loop variable can't capture the user's.
+        check("(let ((loop 'mine)) (do ((i 0 (+ i 1)) (acc '() (cons loop acc))) ((= i 2) acc)))", &["(mine mine)"]);
+        check("(let ((if #f)) (do ((i 0 (+ i 1))) ((= i 2) 'done)))", &["done"]);
+    }
+
+    #[test]
+    fn quasiquote() {
+        check("`(1 ,(+ 1 1) ,@(list 3 4)) `#(1 ,(+ 1 1)) `(a . ,(+ 1 2)) `(x ,@'() y) ``(a ,(b ,(+ 1 2))) `,5 `abc",
+              &["(1 2 3 4)", "#(1 2)", "(a . 3)", "(x y)", "(quasiquote (a (unquote (b 3))))", "5", "abc"]);
+        // Constant parts stay constant, and a local quote doesn't matter.
+        check("(let ((quote list)) `(x y))", &["(x y)"]);
+        check("(unquote 1) `,@(list 1)", &["error: unquote: not in a quasiquote: (unquote 1)", "error: unquote-splicing: not in a list: (unquote-splicing (list 1))"]);
+    }
+
+    #[test]
+    fn deep_expansions() {
+        // A 1,000-argument or nests 1,000 macro uses, and as many lets: on
+        // a default 2MB thread stack, a debug build overflowed at about 150.
+        let src = format!("(or {} 1)", "#f ".repeat(1000));
+        check(&src, &["1"]);
+        // A macro that expands forever is an error, not a crash.
+        check("(define-syntax forever (syntax-rules () ((_ x) (list (forever x))))) (forever 1)",
+              &["forever", "error: macro uses nested more than 10000 deep: (forever 1)"]);
+    }
+
+    #[test]
+    fn macro_errors() {
+        check("(define-syntax swap! (syntax-rules () ((_ a b) (list a b)))) (swap! 1)", &["swap!", "error: no syntax rule matches (swap! 1)"]);
+        check("(define-syntax broken (syntax-rules () ((_ ... x) 1)))",
+              &["error: syntax-rules: ellipsis must follow a pattern in (... x)"]);
+        check("(define-syntax m 5) (syntax-rules ()) if (set! if 1)",
+              &["error: not a syntax-rules transformer: 5", "error: syntax-rules: only allowed as a macro's transformer: (syntax-rules ())",
+                "error: if: syntax used as a variable", "error: set!: can't assign to syntax: if"]);
+        check("(let () (define-syntax m (syntax-rules () ((_) 1))) (define m 2) m)", &["error: define: duplicate definition: m"]);
+    }
+
+    /// `--expand` output: the core AST, with renamed variables numbered.
+    #[test]
+    fn expand_shows_the_core_ast() {
+        let mut s = Session::new();
+        let mut show = |src: &str| {
+            let datum = parse(&mut s.heap, &mut io::new_string_port_input(src)).unwrap();
+            compile::ast::show(&compile::expand::expand(&mut s.heap, &mut s.env, datum).unwrap())
+        };
+        assert_eq!(show("(define (f x) (or x 'none))"),
+                   "(define f (named-lambda (f x.1) (let ((x.2 x.1)) (if x.2 x.2 'none))))");
+        assert_eq!(show("(let loop ((i 0)) (when (< i 3) (loop (+ i 1))))"),
+                   "((letrec* ((loop.1 (named-lambda (loop i.2) (if (< i.2 3) (loop.1 (+ i.2 1)) #<unspecified>)))) loop.1) 0)");
+        assert_eq!(show("`(a ,b)"), "(cons 'a (cons b '()))");
+        assert_eq!(show("(lambda args (set! args 1) args)"), "(lambda args.1 (begin (set! args.1 1) args.1))");
+    }
+
     #[test]
     fn tail_calls_run_in_constant_space() {
-        let mut s = Session::new(false);
+        let mut s = Session::new();
         let mut port = io::new_string_port_input(
             "(define (loop n) (if (= n 0) (%frame-depth) (loop (- n 1)))) (loop 1000000)",
         );
@@ -322,7 +476,7 @@ mod tests {
     /// Evaluate `src` in a fresh session with the default GC schedule and
     /// return the session and the last result.
     fn session_after(src: &str) -> (Session, Value) {
-        let mut s = Session::new(false);
+        let mut s = Session::new();
         s.heap.stress = false;
         let mut port = io::new_string_port_input(src);
         let mut last = Value::UNSPECIFIED;
@@ -379,6 +533,22 @@ mod tests {
             ("named let", "(let l ((m (- n 1))) (loop m))"),
             ("internal definitions", "((lambda () (define m (- n 1)) (loop m)))"),
             ("set! then call", "((lambda (m) (set! m (- m 1)) (loop m)) n)"),
+            ("cond", "(cond (#f 0) (else (loop (- n 1))))"),
+            ("cond =>", "(cond ((- n 1) => loop))"),
+            ("case", "(case 1 ((1) (loop (- n 1))))"),
+            ("case else", "(case 1 ((2) 0) (else (loop (- n 1))))"),
+            ("case =>", "(case 1 ((1) => (lambda (x) (loop (- n 1)))))"),
+            ("and, two operands", "(and #t (loop (- n 1)))"),
+            ("and, last of several", "(and #t 1 (loop (- n 1)))"),
+            ("or, two operands", "(or #f (loop (- n 1)))"),
+            ("or, last of several", "(or #f #f (loop (- n 1)))"),
+            ("when", "(when #t (loop (- n 1)))"),
+            ("unless", "(unless #f (loop (- n 1)))"),
+            ("let*", "(let* ((m (- n 1))) (loop m))"),
+            ("let-syntax", "(let-syntax () (loop (- n 1)))"),
+            ("letrec-syntax", "(letrec-syntax () (loop (- n 1)))"),
+            ("do result", "(do ((i 0 (+ i 1))) ((= i 1) (loop (- n 1))))"),
+            ("macro use", "(let-syntax ((tail-id (syntax-rules () ((_ e) e)))) (tail-id (loop (- n 1))))"),
         ] {
             let src = format!("(define (loop n) (if (= n 0) (%frame-depth) {})) (= (loop 5) (loop 500))", step);
             assert_eq!(run(&src), ["loop", "#t"], "{}", name);

@@ -243,6 +243,8 @@ fn print_into(out: &mut String, v: Value, ctx: &mut Ctx) {
             _ => unreachable!(),
         },
         Obj::Box(_) => out.push_str("#<box>"),
+        Obj::Alias { .. } => print_into(out, Value::obj(crate::compile::syntax_rules::strip(obj)), ctx),
+        Obj::Macro(_) => out.push_str("#<macro>"),
         Obj::Template(t) if t.name.is_empty() => out.push_str("#<template>"),
         Obj::Template(t) => out.push_str(&format!("#<template {}>", t.name)),
     }

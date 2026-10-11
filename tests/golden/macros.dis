@@ -1,0 +1,16 @@
+template top-level
+   0  Const k0         ; my-or
+   1  Return
+template top-level
+   0  MakeClosure k0   ; #<template f>
+   1  GlobalDefine k1  ; f
+   2  Return
+template f  arity 1
+   0  LocalRef 0       ; x
+   1  LocalRef 1       ; temp
+   2  JumpIfFalse →5
+   3  LocalRef 1       ; temp
+   4  Return
+   5  GlobalRef k0     ; car
+   6  LocalRef 0       ; x
+   7  TailCall 1
