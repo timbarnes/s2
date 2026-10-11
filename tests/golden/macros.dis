@@ -11,6 +11,6 @@ template f  arity 1
    2  JumpIfFalse →5
    3  LocalRef 1       ; temp
    4  Return
-   5  GlobalRef k0     ; car
-   6  LocalRef 0       ; x
-   7  TailCall 1
+   5  LocalRef 0       ; x
+   6  Car
+   7  Return

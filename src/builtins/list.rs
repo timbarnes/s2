@@ -7,12 +7,12 @@ use crate::heap::{Heap, Obj, eqv};
 use crate::value::Value;
 
 pub static PRIMITIVES: &[Primitive] = &[
-    prim("pair?", 1, Some(1), |_, a| Ok(Value::bool(matches!(kind(a[0]), Some(Obj::Pair { .. }))))),
-    prim("null?", 1, Some(1), |_, a| Ok(Value::bool(a[0].is_nil()))),
+    prim("pair?", 1, Some(1), pair_q),
+    prim("null?", 1, Some(1), null_q),
     prim("list?", 1, Some(1), |_, a| Ok(Value::bool(proper_length(a[0]).is_some()))),
-    prim("cons", 2, Some(2), |h, a| Ok(h.cons(a[0], a[1]))),
-    prim("car", 1, Some(1), |_, a| Ok(pair_arg(a[0], "car")?.0.get())),
-    prim("cdr", 1, Some(1), |_, a| Ok(pair_arg(a[0], "cdr")?.1.get())),
+    prim("cons", 2, Some(2), cons),
+    prim("car", 1, Some(1), car),
+    prim("cdr", 1, Some(1), cdr),
     prim("set-car!", 2, Some(2), |_, a| {
         pair_arg(a[0], "set-car!")?.0.set(a[1]);
         Ok(Value::UNSPECIFIED)
@@ -74,6 +74,28 @@ pub static PRIMITIVES: &[Primitive] = &[
     prim("assq", 2, Some(2), |_, a| ass_by(a, "assq", Value::eq)),
     prim("assv", 2, Some(2), |_, a| ass_by(a, "assv", eqv)),
 ];
+
+// Named, because the VM calls them when an inlined use's fast path
+// doesn't apply (`vm/machine.rs`).
+pub fn pair_q(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(Value::bool(matches!(kind(a[0]), Some(Obj::Pair { .. }))))
+}
+
+pub fn null_q(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(Value::bool(a[0].is_nil()))
+}
+
+pub fn cons(h: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(h.cons(a[0], a[1]))
+}
+
+pub fn car(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(pair_arg(a[0], "car")?.0.get())
+}
+
+pub fn cdr(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(pair_arg(a[0], "cdr")?.1.get())
+}
 
 /// `caar` … `cddddr`: the letters between `c` and `r`, applied right to
 /// left.

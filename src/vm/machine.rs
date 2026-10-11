@@ -3,7 +3,7 @@
 //! ```text
 //! value stack:  … │ callee │ arg0 … argN-1 │ let variables │ temporaries │
 //!                            ▲ fp
-//! frame stack:  Frame { closure, ip, fp }   the caller's state, saved by Call
+//! frame stack:  Frame { closure, t, free, ip, fp }   the caller's state, saved by Call
 //! ```
 //!
 //! - `Call n` on a closure checks the arity, saves the caller's registers
@@ -43,20 +43,32 @@
 //! catches errors from builtins, unbound variables and bad calls alike.
 //! Only an error nobody handles comes out of `run`, through `%abort`.
 
-use crate::builtins::{Error, ErrorKind, PrimFn, Primitive, standard_ports};
+use crate::builtins::{Error, ErrorKind, PrimFn, Primitive, list, number, predicate, standard_ports};
 use crate::compile;
 use crate::globals::{TopBinding, cell_name, cell_value, env_of};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
 use crate::printer::{display_value, print_value};
 use crate::value::Value;
-use crate::vm::op::{Op, Template};
+use crate::vm::op::{Op, Template, Test};
 
-/// A caller's registers, saved while its callee runs.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A caller's registers, saved while its callee runs. The closure's
+/// template and free variables are saved too, so a return needn't look
+/// them up again (P10).
+#[derive(Clone, Copy)]
 pub struct Frame {
     pub closure: GcRef,
+    t: &'static Template,
+    free: &'static [std::cell::Cell<Value>],
     ip: usize,
     fp: usize,
+}
+
+/// Frames are the same if they return into the same activation (what an
+/// escape continuation checks).
+impl PartialEq for Frame {
+    fn eq(&self, other: &Frame) -> bool {
+        (self.closure, self.ip, self.fp) == (other.closure, other.ip, other.fp)
+    }
 }
 
 pub struct Vm {
@@ -73,17 +85,38 @@ pub struct Vm {
 }
 
 /// The template and free variables of a closure.
-fn parts<'a>(closure: GcRef) -> (&'a Template, &'a [Value]) {
+fn parts(closure: GcRef) -> (&'static Template, &'static [std::cell::Cell<Value>]) {
     match &closure.get().kind {
         Obj::Closure { template, free } => (template_of(*template), free),
         _ => unreachable!("not a closure"),
     }
 }
 
-fn template_of<'a>(t: GcRef) -> &'a Template {
+fn template_of(t: GcRef) -> &'static Template {
     match &t.get().kind {
         Obj::Template(t) => t,
         _ => unreachable!("not a template"),
+    }
+}
+
+/// The builtin a `JumpIfNot` test calls when its fast path doesn't apply.
+fn test_fallback(test: Test) -> crate::builtins::BuiltinFn {
+    match test {
+        Test::NullP => list::null_q,
+        Test::PairP => list::pair_q,
+        Test::EqP => predicate::eq_q,
+        Test::NumEq => number::num_eq,
+        Test::Lt => number::lt,
+        Test::Gt => number::gt,
+        Test::Le => number::le,
+        Test::Ge => number::ge,
+    }
+}
+
+fn pair_of<'a>(v: Value) -> Option<(&'a std::cell::Cell<Value>, &'a std::cell::Cell<Value>)> {
+    match v.as_obj().map(|o| &o.kind) {
+        Some(Obj::Pair { car, cdr }) => Some((car, cdr)),
+        _ => None,
     }
 }
 
@@ -154,7 +187,7 @@ impl Vm {
     /// Run a top-level template (a procedure of no arguments) and return
     /// its value. An error nobody handles aborts the whole form.
     pub fn run(&mut self, heap: &mut Heap, template: GcRef) -> Result<Value, String> {
-        let closure = heap.closure(template, Box::new([]));
+        let closure = heap.closure(template, std::iter::empty());
         self.stack.clear();
         self.frames.clear();
         self.backtrace.clear();
@@ -180,7 +213,7 @@ impl Vm {
                 match self.frames.pop() {
                     Some(frame) => {
                         closure = frame.closure;
-                        (t, free) = parts(closure);
+                        (t, free) = (frame.t, frame.free);
                         ip = frame.ip;
                         fp = frame.fp;
                         self.stack.push(v);
@@ -214,7 +247,7 @@ impl Vm {
                 let message = heap.string(&e.message);
                 let irritants = heap.list(e.irritants);
                 let obj = heap.error_object(e.kind, message, irritants);
-                self.frames.push(Frame { closure, ip, fp });
+                self.frames.push(Frame { closure, t, free, ip, fp });
                 let base = self.stack.len();
                 self.stack.push(handler);
                 self.stack.push(obj);
@@ -226,9 +259,43 @@ impl Vm {
             }};
         }
 
+        // An inlined primitive of one or two arguments (`Op::Car` and the
+        // rest): `$fast` gives the result from the arguments if it can,
+        // else the builtin `$slow` is called on them. `$run` is the
+        // instruction loop's label, as for `fail!`.
+        macro_rules! inline1 {
+            ($run:lifetime, $fast:expr, $slow:path) => {{
+                let a = *self.stack.last().unwrap();
+                let v = match $fast(a) {
+                    Some(v) => v,
+                    None => match $slow(heap, &[a]) {
+                        Ok(v) => v,
+                        Err(e) => fail!($run, e),
+                    },
+                };
+                *self.stack.last_mut().unwrap() = v;
+            }};
+        }
+        macro_rules! inline2 {
+            ($run:lifetime, $fast:expr, $slow:path) => {{
+                let b = self.stack.pop().unwrap();
+                let a = *self.stack.last().unwrap();
+                let v = match $fast(a, b) {
+                    Some(v) => v,
+                    None => match $slow(heap, &[a, b]) {
+                        Ok(v) => v,
+                        Err(e) => fail!($run, e),
+                    },
+                };
+                *self.stack.last_mut().unwrap() = v;
+            }};
+        }
+
         'run: loop {
             let op = t.code[ip];
             ip += 1;
+            #[cfg(feature = "stats")]
+            crate::vm::stats::record(op);
             match op {
                 Op::Const(k) => self.stack.push(t.consts[k as usize]),
                 Op::Fixnum(n) => self.stack.push(Value::fixnum(n as i64).unwrap()),
@@ -239,7 +306,13 @@ impl Vm {
                 Op::Undefined => self.stack.push(Value::UNDEFINED),
                 Op::LocalRef(i) => self.stack.push(self.stack[fp + i as usize]),
                 Op::LocalSet(i) => self.stack[fp + i as usize] = self.stack.pop().unwrap(),
-                Op::FreeRef(i) => self.stack.push(free[i as usize]),
+                Op::FreeRef(i) => self.stack.push(free[i as usize].get()),
+                Op::PatchFree(closure_slot, i, value_slot) => {
+                    let Some(Obj::Closure { free, .. }) = self.stack[fp + closure_slot as usize].as_obj().map(|o| &o.kind) else {
+                        unreachable!("PatchFree of a non-closure")
+                    };
+                    free[i as usize].set(self.stack[fp + value_slot as usize]);
+                }
                 Op::MakeBox(i) => {
                     let slot = fp + i as usize;
                     self.stack[slot] = heap.make_box(self.stack[slot]);
@@ -276,6 +349,33 @@ impl Vm {
                     self.stack.push(cell_name(cell));
                 }
                 Op::Jump(target) => ip = target as usize,
+                Op::JumpIfNot(test, target) => {
+                    let at = self.stack.len() - test.arity();
+                    let a = self.stack[at];
+                    let b = self.stack.get(at + 1).copied().unwrap_or(Value::NIL);
+                    let fixnums = || Some((a.as_fixnum()?, b.as_fixnum()?));
+                    let fast = match test {
+                        Test::NullP => Some(a.is_nil()),
+                        Test::PairP => Some(pair_of(a).is_some()),
+                        Test::EqP => Some(a.eq(b)),
+                        Test::NumEq => fixnums().map(|(x, y)| x == y),
+                        Test::Lt => fixnums().map(|(x, y)| x < y),
+                        Test::Gt => fixnums().map(|(x, y)| x > y),
+                        Test::Le => fixnums().map(|(x, y)| x <= y),
+                        Test::Ge => fixnums().map(|(x, y)| x >= y),
+                    };
+                    let holds = match fast {
+                        Some(holds) => holds,
+                        None => match test_fallback(test)(heap, &self.stack[at..]) {
+                            Ok(v) => v.is_true(),
+                            Err(e) => fail!('run, e),
+                        },
+                    };
+                    self.stack.truncate(at);
+                    if !holds {
+                        ip = target as usize;
+                    }
+                }
                 Op::JumpIfFalse(target) => {
                     if !self.stack.pop().unwrap().is_true() {
                         ip = target as usize;
@@ -292,8 +392,7 @@ impl Vm {
                 Op::MakeClosure(k) => {
                     let template = t.consts[k as usize].as_ref().unwrap();
                     let at = self.stack.len() - template_of(template).nfree as usize;
-                    let captured: Box<[Value]> = self.stack.drain(at..).collect();
-                    let c = heap.closure(template, captured);
+                    let c = heap.closure(template, self.stack.drain(at..));
                     self.stack.push(c);
                 }
                 Op::Call(argc) | Op::TailCall(argc) => {
@@ -319,7 +418,7 @@ impl Vm {
                                     fail!('run, e);
                                 }
                                 if !tail {
-                                    self.frames.push(Frame { closure, ip, fp });
+                                    self.frames.push(Frame { closure, t, free, ip, fp });
                                     fp = base + 1;
                                 }
                                 closure = f.as_ref().unwrap();
@@ -338,7 +437,7 @@ impl Vm {
                                     if n != 1 {
                                         fail!('run, format!("{}: wrong number of arguments: {}", p.name, n));
                                     }
-                                    let here = Frame { closure, ip, fp };
+                                    let here = Frame { closure, t, free, ip, fp };
                                     let k = if matches!(p.f, PrimFn::CallCc) {
                                         self.capture(heap, tail, base, here)
                                     } else {
@@ -361,7 +460,7 @@ impl Vm {
                                     match compile::compile(heap, env.as_ref().unwrap(), expr) {
                                         Ok(template) => {
                                             // Call the compiled thunk in place of eval.
-                                            let thunk = heap.closure(template, Box::new([]));
+                                            let thunk = heap.closure(template, std::iter::empty());
                                             self.stack.truncate(base);
                                             self.stack.push(thunk);
                                         }
@@ -418,6 +517,29 @@ impl Vm {
                     }
                 }
                 Op::Return => do_return!(self.stack.pop().unwrap()),
+                Op::SelfTailCall(n) => {
+                    // A loop must reach a safepoint, as a TailCall would.
+                    self.safepoint(heap, closure);
+                    let args = self.stack.len() - n as usize;
+                    self.stack.drain(fp..args);
+                    ip = 0;
+                }
+                Op::Car => inline1!('run, |a: Value| pair_of(a).map(|(car, _)| car.get()), list::car),
+                Op::Cdr => inline1!('run, |a: Value| pair_of(a).map(|(_, cdr)| cdr.get()), list::cdr),
+                Op::NullP => inline1!('run, |a: Value| Some(Value::bool(a.is_nil())), list::null_q),
+                Op::PairP => inline1!('run, |a: Value| Some(Value::bool(pair_of(a).is_some())), list::pair_q),
+                Op::Not => inline1!('run, |a: Value| Some(Value::bool(!a.is_true())), predicate::not),
+                Op::Cons => inline2!('run, |a, b| Some(heap.cons(a, b)), list::cons),
+                Op::EqP => inline2!('run, |a: Value, b| Some(Value::bool(a.eq(b))), predicate::eq_q),
+                // Two fixnums' sum or difference fits an i64; Value::fixnum
+                // says whether it is still a fixnum.
+                Op::Add => inline2!('run, |a: Value, b: Value| Value::fixnum(a.as_fixnum()? + b.as_fixnum()?), number::add),
+                Op::Sub => inline2!('run, |a: Value, b: Value| Value::fixnum(a.as_fixnum()? - b.as_fixnum()?), number::sub),
+                Op::NumEq => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? == b.as_fixnum()?)), number::num_eq),
+                Op::Lt => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? < b.as_fixnum()?)), number::lt),
+                Op::Gt => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? > b.as_fixnum()?)), number::gt),
+                Op::Le => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? <= b.as_fixnum()?)), number::le),
+                Op::Ge => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? >= b.as_fixnum()?)), number::ge),
             }
         }
     }
@@ -468,8 +590,17 @@ impl Vm {
     }
 
     /// Check the argument count for a call to `callee`, whose closure is in
-    /// slot `base`, and collect any rest arguments into a list.
+    /// slot `base`, and collect any rest arguments into a list. The common
+    /// case, the right number of arguments and no rest list, is inline.
+    #[inline]
     fn bind_arguments(&mut self, heap: &mut Heap, callee: &Template, base: usize) -> Result<(), String> {
+        if !callee.rest && self.stack.len() - base - 1 == callee.required as usize {
+            return Ok(());
+        }
+        self.bind_arguments_slow(heap, callee, base)
+    }
+
+    fn bind_arguments_slow(&mut self, heap: &mut Heap, callee: &Template, base: usize) -> Result<(), String> {
         let argc = self.stack.len() - base - 1;
         let required = callee.required as usize;
         if argc < required || (!callee.rest && argc > required) {

@@ -20,11 +20,13 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::compile::analyze::{boxed_variables, free_variables};
+use crate::compile::analyze::{boxed_variables, free_variables, lambda_group};
 use crate::compile::ast::{Expr, Lambda, Var, VarId};
-use crate::heap::{GcRef, Heap};
+use crate::globals::{TopBinding, cell_name, cell_value, env_of};
+use crate::heap::{GcRef, Heap, Obj};
 use crate::printer::print_value;
 use crate::value::Value;
+use crate::vm::op::Test;
 use crate::vm::{Op, Template};
 
 /// Compile a top-level form into a template of no arguments.
@@ -55,6 +57,15 @@ struct Gen<'h> {
     names: FxHashMap<VarId, String>,
     local_names: Vec<String>,
     free_names: Vec<String>,
+    /// The lambda-group variable this procedure is bound to, if it is
+    /// one: its own name, which always means this closure, so a tail call
+    /// to it can be a `SelfTailCall`.
+    self_var: Option<VarId>,
+    /// Set while compiling a lambda group's init: the variable the lambda
+    /// is bound to, handed to it as its `self_var`.
+    next_self: Option<VarId>,
+    /// The number of parameters of the procedure being compiled.
+    params: usize,
 }
 
 impl<'h> Gen<'h> {
@@ -69,6 +80,9 @@ impl<'h> Gen<'h> {
             names: FxHashMap::default(),
             local_names: Vec::new(),
             free_names: Vec::new(),
+            self_var: None,
+            next_self: None,
+            params: 0,
         }
     }
 
@@ -105,7 +119,7 @@ impl<'h> Gen<'h> {
     fn patch(&mut self, at: usize) {
         let here = self.code.len() as u32;
         match &mut self.code[at] {
-            Op::Jump(t) | Op::JumpIfFalse(t) => *t = here,
+            Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfNot(_, t) => *t = here,
             op => unreachable!("patching {:?}", op),
         }
     }
@@ -218,9 +232,20 @@ impl<'h> Gen<'h> {
                 self.ret(tail);
             }
             Expr::If(test, then, els) => {
-                self.expr(test, false);
-                let to_else = self.emit(Op::JumpIfFalse(0));
-                self.depth -= 1;
+                let to_else = match self.fused_test(test) {
+                    Some((t, args)) => {
+                        for a in args {
+                            self.expr(a, false);
+                        }
+                        self.depth -= args.len();
+                        self.emit(Op::JumpIfNot(t, 0))
+                    }
+                    None => {
+                        self.expr(test, false);
+                        self.depth -= 1;
+                        self.emit(Op::JumpIfFalse(0))
+                    }
+                };
                 let depth = self.depth;
                 self.expr(then, tail);
                 self.depth = depth;
@@ -245,17 +270,40 @@ impl<'h> Gen<'h> {
                 self.expr(last, tail);
             }
             Expr::Lambda(l) => {
+                let self_var = self.next_self.take();
                 let free = free_variables(l);
                 for &id in &free {
                     self.load_raw(id);
                 }
-                let t = self.lambda(l, &free);
+                let t = self.lambda(l, &free, self_var);
                 let k = self.constant(Value::obj(t));
                 self.emit(Op::MakeClosure(k));
                 self.depth = self.depth - free.len() + 1;
                 self.ret(tail);
             }
+            // A loop: a tail call from a lambda-group procedure to itself.
+            Expr::Call(f, args)
+                if tail && matches!(**f, Expr::LocalRef(id) if Some(id) == self.self_var) && args.len() == self.params =>
+            {
+                for a in args {
+                    self.expr(a, false);
+                }
+                self.emit(Op::SelfTailCall(args.len() as u16));
+            }
             Expr::Call(f, args) => {
+                let inline = match **f {
+                    Expr::GlobalRef(cell) => self.inlinable(cell, args.len()),
+                    _ => None,
+                };
+                if let Some(op) = inline {
+                    for a in args {
+                        self.expr(a, false);
+                    }
+                    self.emit(op);
+                    self.depth = self.depth + 1 - args.len();
+                    self.ret(tail);
+                    return;
+                }
                 self.expr(f, false);
                 for a in args {
                     self.expr(a, false);
@@ -286,10 +334,41 @@ impl<'h> Gen<'h> {
                     self.bind_local(*var, base + i);
                     self.box_if_needed(*var, base + i);
                 }
+                let group = lambda_group(bindings, self.boxed);
                 for (var, init) in bindings {
+                    self.next_self = group.then_some(var.id);
                     self.assign(var.id, init);
+                    self.next_self = None;
+                }
+                if group {
+                    self.patch_group(bindings);
                 }
                 self.end_scope(body, tail, bindings.len());
+            }
+        }
+    }
+
+    /// The test and arguments of an `if` test that is an inlinable
+    /// predicate or comparison, for `JumpIfNot`.
+    fn fused_test<'e>(&self, test: &'e Expr) -> Option<(Test, &'e [Expr])> {
+        let Expr::Call(f, args) = test else { return None };
+        let Expr::GlobalRef(cell) = **f else { return None };
+        Some((Test::of(self.inlinable(cell, args.len())?)?, args))
+    }
+
+    /// After a lambda group's closures are made, in order: each one that
+    /// captured a member made at or after it captured a placeholder (the
+    /// slot's `Undefined`), so fill in the member now.
+    fn patch_group(&mut self, bindings: &[(Var, Expr)]) {
+        for (i, (var, init)) in bindings.iter().enumerate() {
+            let Expr::Lambda(l) = init else { unreachable!("a lambda group") };
+            for (j, fv) in free_variables(l).iter().enumerate() {
+                if let Some(k) = bindings.iter().position(|(v, _)| v.id == *fv)
+                    && k >= i
+                    && let (Loc::Local(c), Loc::Local(v)) = (self.locs[&var.id], self.locs[fv])
+                {
+                    self.emit(Op::PatchFree(c, j as u16, v));
+                }
             }
         }
     }
@@ -304,10 +383,28 @@ impl<'h> Gen<'h> {
         }
     }
 
+    /// The inlined instruction for a call to the global `cell` with `argc`
+    /// arguments, if it is one: `cell` must be the system environment's
+    /// binding of a standard procedure that has one. Those cells never
+    /// change (user code can't assign an imported name, and a `define` of
+    /// one makes a new cell), so the inlined code means exactly what the
+    /// call does.
+    fn inlinable(&self, cell: GcRef, argc: usize) -> Option<Op> {
+        let Some(Obj::Primitive(p)) = cell_value(cell).get().as_obj().map(|o| &o.kind) else { return None };
+        let name = cell_name(cell).as_ref()?;
+        let system = env_of(self.heap.system?).borrow().lookup(name);
+        if system != Some(TopBinding::Variable(cell)) {
+            return None;
+        }
+        Op::inline(p.name, argc)
+    }
+
     /// Compile an inner lambda into its own template. `free` lists its free
     /// variables; inside it they are `FreeRef 0`, `FreeRef 1`, ….
-    fn lambda(&mut self, l: &Lambda, free: &[VarId]) -> GcRef {
+    fn lambda(&mut self, l: &Lambda, free: &[VarId], self_var: Option<VarId>) -> GcRef {
         let mut g = Gen::new(self.heap, self.boxed);
+        g.self_var = self_var.filter(|_| l.rest.is_none());
+        g.params = l.params.len();
         for (i, p) in l.params.iter().chain(&l.rest).enumerate() {
             g.bind_local(*p, i);
             g.box_if_needed(*p, i);

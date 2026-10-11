@@ -7,10 +7,10 @@ use crate::heap::{Heap, Obj, eqv, equal};
 use crate::value::Value;
 
 pub static PRIMITIVES: &[Primitive] = &[
-    prim("eq?", 2, Some(2), |_, a| Ok(Value::bool(a[0].eq(a[1])))),
+    prim("eq?", 2, Some(2), eq_q),
     prim("eqv?", 2, Some(2), |_, a| Ok(Value::bool(eqv(a[0], a[1])))),
     prim("equal?", 2, Some(2), |_, a| Ok(Value::bool(equal(a[0], a[1])))),
-    prim("not", 1, Some(1), |_, a| Ok(Value::bool(!a[0].is_true()))),
+    prim("not", 1, Some(1), not),
     prim("boolean?", 1, Some(1), |_, a| Ok(Value::bool(a[0].as_bool().is_some()))),
     prim("boolean=?", 2, None, |_, a| all_same(a, "boolean=?", "a boolean", |v| v.as_bool().is_some())),
     prim("symbol?", 1, Some(1), |_, a| Ok(Value::bool(is_symbol(a[0])))),
@@ -21,6 +21,14 @@ pub static PRIMITIVES: &[Primitive] = &[
         Ok(h.intern(&name))
     }),
 ];
+
+pub fn eq_q(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(Value::bool(a[0].eq(a[1])))
+}
+
+pub fn not(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(Value::bool(!a[0].is_true()))
+}
 
 fn is_symbol(v: Value) -> bool {
     matches!(kind(v), Some(Obj::Symbol(_)))

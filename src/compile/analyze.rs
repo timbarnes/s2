@@ -93,11 +93,24 @@ fn walk(e: &Expr, bound: &mut FxHashSet<VarId>, refs: &mut Vec<VarId>) {
 /// body) needs no box: its init is an ordinary assignment to a stack slot,
 /// before anything can copy it. Re-entering a continuation captured during
 /// a later init repeats the inits after it, so a copied slot is right.
+///
+/// Nor does a member of a **lambda group**: a `letrec` whose inits are all
+/// lambdas, none of whose variables is assigned (`lambda_group`). No init
+/// runs any code, so nothing can use a member early. Codegen makes the
+/// closures in order, then patches the ones that captured a member made
+/// after them (*Fixing Letrec*, P10). A named `let` is such a group, so its
+/// loop variable is no longer a box.
 pub fn boxed_variables(e: &Expr) -> FxHashSet<VarId> {
     let mut b = Boxing::default();
+    b.collect_assigned(e);
     b.walk(e);
     b.assigned.extend(b.early);
     b.assigned
+}
+
+/// Whether a `letrec`'s bindings are a lambda group (see `boxed_variables`).
+pub fn lambda_group(bindings: &[(crate::compile::ast::Var, Expr)], boxed: &FxHashSet<VarId>) -> bool {
+    bindings.iter().all(|(v, init)| matches!(init, Expr::Lambda(_)) && !boxed.contains(&v.id))
 }
 
 #[derive(Default)]
@@ -110,6 +123,29 @@ struct Boxing {
 }
 
 impl Boxing {
+    /// The first pass: every variable that `set!` assigns.
+    fn collect_assigned(&mut self, e: &Expr) {
+        match e {
+            Expr::Const(_) | Expr::GlobalRef(_) | Expr::LocalRef(_) => {}
+            Expr::LocalSet(id, value) => {
+                self.assigned.insert(*id);
+                self.collect_assigned(value);
+            }
+            Expr::GlobalDefine(_, value) | Expr::GlobalSet(_, value) => self.collect_assigned(value),
+            Expr::If(a, b, c) => [a, b, c].iter().for_each(|x| self.collect_assigned(x)),
+            Expr::Seq(body) => body.iter().for_each(|x| self.collect_assigned(x)),
+            Expr::Lambda(l) => self.collect_assigned(&l.body),
+            Expr::Call(f, args) => {
+                self.collect_assigned(f);
+                args.iter().for_each(|x| self.collect_assigned(x));
+            }
+            Expr::Let(bindings, body) | Expr::Letrec(bindings, body) => {
+                bindings.iter().for_each(|(_, init)| self.collect_assigned(init));
+                self.collect_assigned(body);
+            }
+        }
+    }
+
     fn used(&mut self, id: VarId) {
         if self.pending.contains(&id) {
             self.early.insert(id);
@@ -142,7 +178,11 @@ impl Boxing {
                 self.walk(body);
             }
             Expr::Letrec(bindings, body) => {
-                self.pending.extend(bindings.iter().map(|(v, _)| v.id));
+                // In a lambda group nothing runs during the inits, so no
+                // reference is early.
+                if !lambda_group(bindings, &self.assigned) {
+                    self.pending.extend(bindings.iter().map(|(v, _)| v.id));
+                }
                 for (var, init) in bindings {
                     self.walk(init);
                     self.pending.remove(&var.id);

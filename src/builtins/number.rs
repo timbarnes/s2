@@ -29,11 +29,11 @@ pub static PRIMITIVES: &[Primitive] = &[
     prim("-", 1, None, sub),
     prim("*", 0, None, mul),
     prim("/", 1, None, div),
-    prim("=", 2, None, |_, a| compare(a, "=", Ordering::is_eq)),
-    prim("<", 2, None, |_, a| compare(a, "<", Ordering::is_lt)),
-    prim(">", 2, None, |_, a| compare(a, ">", Ordering::is_gt)),
-    prim("<=", 2, None, |_, a| compare(a, "<=", Ordering::is_le)),
-    prim(">=", 2, None, |_, a| compare(a, ">=", Ordering::is_ge)),
+    prim("=", 2, None, num_eq),
+    prim("<", 2, None, lt),
+    prim(">", 2, None, gt),
+    prim("<=", 2, None, le),
+    prim(">=", 2, None, ge),
     prim("number?", 1, Some(1), |_, a| Ok(Value::bool(is_number(a[0])))),
     prim("complex?", 1, Some(1), |_, a| Ok(Value::bool(is_number(a[0])))),
     prim("real?", 1, Some(1), |_, a| Ok(Value::bool(is_number(a[0])))),
@@ -279,14 +279,14 @@ fn int128(heap: &mut Heap, n: i128) -> Value {
 
 // Sums of 61-bit fixnums can't overflow an i128 for any realistic number of
 // arguments.
-fn add(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
+pub fn add(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     if let Some(ns) = all_fixnums(args) {
         return Ok(int128(heap, ns.sum()));
     }
     fold(heap, Num::Int(BigInt::zero()), args, Op::Add, "+")
 }
 
-fn sub(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
+pub fn sub(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     if let Some(mut ns) = all_fixnums(args) {
         let first = ns.next().unwrap();
         return Ok(int128(heap, if args.len() == 1 { -first } else { ns.fold(first, |a, b| a - b) }));
@@ -372,6 +372,26 @@ fn exact_vs_float(exact: &Num, f: f64) -> Option<Ordering> {
         return Some(if f > 0.0 { Ordering::Less } else { Ordering::Greater });
     }
     Some(exact.to_ratio().cmp(&BigRational::from_float(f)?))
+}
+
+pub fn num_eq(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    compare(a, "=", Ordering::is_eq)
+}
+
+pub fn lt(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    compare(a, "<", Ordering::is_lt)
+}
+
+pub fn gt(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    compare(a, ">", Ordering::is_gt)
+}
+
+pub fn le(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    compare(a, "<=", Ordering::is_le)
+}
+
+pub fn ge(_: &mut Heap, a: &[Value]) -> Result<Value, Error> {
+    compare(a, ">=", Ordering::is_ge)
 }
 
 fn compare(args: &[Value], who: &str, ok: fn(Ordering) -> bool) -> Result<Value, Error> {

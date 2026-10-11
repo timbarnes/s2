@@ -213,6 +213,8 @@ impl Session {
             }
         }
         std::io::stdout().flush().ok();
+        #[cfg(feature = "stats")]
+        vm::stats::report();
         std::process::exit(0)
     }
 }
@@ -270,6 +272,8 @@ fn run_main() {
         _ => usage(),
     };
     std::io::stdout().flush().ok();
+    #[cfg(feature = "stats")]
+    vm::stats::report();
     std::process::exit(if ok { 0 } else { 1 });
 }
 

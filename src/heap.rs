@@ -121,7 +121,9 @@ pub enum Obj {
     Template(Template),
     /// A procedure written in Scheme: a template plus the values of its free
     /// variables, copied when the closure was made (a flat closure, D6).
-    Closure { template: GcRef, free: Box<[Value]> },
+    /// The slots are cells only so that a `letrec` of lambdas can fill in
+    /// the members made after this one (`Op::PatchFree`).
+    Closure { template: GcRef, free: Box<[Cell<Value>]> },
 }
 
 /// The minimum number of allocations between collections (s1's default).
@@ -344,7 +346,8 @@ impl Heap {
         self.alloc(Obj::Box(Cell::new(v)))
     }
 
-    pub fn closure(&mut self, template: GcRef, free: Box<[Value]>) -> Value {
+    pub fn closure(&mut self, template: GcRef, free: impl Iterator<Item = Value>) -> Value {
+        let free = free.map(Cell::new).collect();
         self.alloc(Obj::Closure { template, free })
     }
 
@@ -427,7 +430,7 @@ impl Marker {
                 Obj::Template(t) => t.consts.iter().for_each(|&k| self.value(k)),
                 Obj::Closure { template, free } => {
                     self.obj(*template);
-                    free.iter().for_each(|&v| self.value(v));
+                    free.iter().for_each(|v| self.value(v.get()));
                 }
                 Obj::Symbol(_) | Obj::Str(_) | Obj::Bytevector(_) | Obj::BigInt(_) | Obj::Rational(_) | Obj::Primitive(_) | Obj::Port(_) => {}
             }

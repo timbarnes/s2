@@ -88,15 +88,20 @@
        (%define-record-field type fieldspec) ...))))
 
 ;; One field spec: (field), (field accessor) or (field accessor modifier).
+;; The field's index is found once, when the record type is defined, and
+;; kept in `index`, a definition only this expansion can see (P10).
 (define-syntax %define-record-field
   (syntax-rules ()
     ((_ type (field)) 'field)
     ((_ type (field accessor))
-     (define (accessor obj) (%record-get obj type 'field)))
+     (begin
+       (define index (%record-index type 'field))
+       (define (accessor obj) (%record-ref obj type index))))
     ((_ type (field accessor modifier))
      (begin
-       (define (accessor obj) (%record-get obj type 'field))
-       (define (modifier obj value) (%record-set! obj type 'field value))))))
+       (define index (%record-index type 'field))
+       (define (accessor obj) (%record-ref obj type index))
+       (define (modifier obj value) (%record-set-index! obj type index value))))))
 
 ;;; ---------------------------------------------------------------------
 ;;; Lists (R7RS §6.4), forked from s1-core.scm. map and for-each stop at

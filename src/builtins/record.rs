@@ -1,8 +1,10 @@
 //! Records (R7RS §5.5): the primitives `define-record-type` (in
 //! `scheme/core.scm`) expands into. Forked from s1's `builtin/record.rs`.
 //!
-//! ponytail: accessors find their field by name on every call, as in s1.
-//! P10 can compute the index once, when the accessor is defined.
+//! An accessor finds its field's index once, when the record type is
+//! defined (`%record-index`), and then reads by index (`%record-ref`). s1
+//! looked the field up by name on every call; P10 measured that at about
+//! 5% of the typical program.
 
 use super::{Error, err, Primitive, expected, kind, list_arg, prim};
 use crate::heap::{GcRef, Heap, Obj};
@@ -19,12 +21,26 @@ pub static PRIMITIVES: &[Primitive] = &[
         let i = field_index(a[1], a[2], "record accessor")?;
         Ok(record_fields(a[0], a[1], "record accessor")?[i].get())
     }),
+    prim("%record-index", 2, Some(2), |_, a| Ok(super::fixnum(field_index(a[0], a[1], "define-record-type")?))),
+    prim("%record-ref", 3, Some(3), |_, a| Ok(field(a, "record accessor")?.get())),
+    prim("%record-set-index!", 4, Some(4), |_, a| {
+        field(a, "record modifier")?.set(a[3]);
+        Ok(Value::UNSPECIFIED)
+    }),
     prim("%record-set!", 4, Some(4), |_, a| {
         let i = field_index(a[1], a[2], "record modifier")?;
         record_fields(a[0], a[1], "record modifier")?[i].set(a[3]);
         Ok(Value::UNSPECIFIED)
     }),
 ];
+
+/// The field `args[2]` (an index from `%record-index`) of the record
+/// `args[0]`, which must be of type `args[1]`. The define-record-type
+/// macro passes a right index, but the procedure can be called directly.
+fn field<'a>(args: &[Value], who: &str) -> Result<&'a std::cell::Cell<Value>, Error> {
+    let fields = record_fields(args[0], args[1], who)?;
+    args[2].as_fixnum().and_then(|i| fields.get(usize::try_from(i).ok()?)).ok_or_else(|| err!("{}: bad field index {}", who, print_value(args[2])))
+}
 
 /// The name and field names of a record type.
 fn record_type<'a>(v: Value, who: &str) -> Result<(Value, &'a [Value]), Error> {

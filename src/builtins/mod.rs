@@ -15,10 +15,10 @@
 
 mod char;
 mod control;
-mod list;
-mod number;
+pub mod list;
+pub mod number;
 mod port;
-mod predicate;
+pub mod predicate;
 mod record;
 mod string;
 mod system;

@@ -35,11 +35,13 @@ fn template_into(out: &mut String, template: GcRef) {
             Op::LocalSet(i) => (format!("LocalSet {}", i), name(&t.local_names, i)),
             Op::MakeBox(i) => (format!("MakeBox {}", i), name(&t.local_names, i)),
             Op::FreeRef(i) => (format!("FreeRef {}", i), name(&t.free_names, i)),
+            Op::PatchFree(c, i, v) => (format!("PatchFree {} {} {}", c, i, v), format!("{}.{} = {}", name(&t.local_names, c), i, name(&t.local_names, v))),
             Op::GlobalSet(k) => (format!("GlobalSet k{}", k), cell(constant(k))),
             Op::GlobalRef(k) => (format!("GlobalRef k{}", k), cell(constant(k))),
             Op::GlobalDefine(k) => (format!("GlobalDefine k{}", k), cell(constant(k))),
             Op::Jump(target) => (format!("Jump →{}", target), String::new()),
             Op::JumpIfFalse(target) => (format!("JumpIfFalse →{}", target), String::new()),
+            Op::JumpIfNot(test, target) => (format!("JumpIfNot {:?} →{}", test, target), String::new()),
             Op::Slide(n) => (format!("Slide {}", n), String::new()),
             Op::MakeClosure(k) => {
                 let r = constant(k).as_ref().unwrap();
@@ -48,6 +50,7 @@ fn template_into(out: &mut String, template: GcRef) {
             }
             Op::Call(n) => (format!("Call {}", n), String::new()),
             Op::TailCall(n) => (format!("TailCall {}", n), String::new()),
+            Op::SelfTailCall(n) => (format!("SelfTailCall {}", n), String::new()),
             op => (format!("{:?}", op), String::new()),
         };
         if note.is_empty() {

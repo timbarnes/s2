@@ -13,3 +13,9 @@ rustc-hash = "1.1"
 
 [profile.release]
 debug = true
+
+[features]
+# Count executed instructions, by opcode and by consecutive pair, and print
+# the counts at exit (plan/05 §7): what superinstructions would pay.
+# cargo run --release --features stats -- bench/fib.scm
+stats = []
