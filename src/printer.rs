@@ -243,10 +243,44 @@ fn print_into(out: &mut String, v: Value, ctx: &mut Ctx) {
             _ => unreachable!(),
         },
         Obj::Box(_) => out.push_str("#<box>"),
+        Obj::Port(p) => out.push_str(&describe_port(&p.borrow())),
+        Obj::RecordType { name, .. } => {
+            out.push_str("#<record-type ");
+            print_into(out, *name, ctx);
+            out.push('>');
+        }
+        Obj::Record { rtype, fields } => {
+            out.push_str("#<");
+            if let Obj::RecordType { name, .. } = &rtype.get().kind {
+                print_into(out, *name, ctx);
+            }
+            for f in fields.iter() {
+                out.push(' ');
+                print_into(out, f.get(), ctx);
+            }
+            out.push('>');
+        }
         Obj::Alias { .. } => print_into(out, Value::obj(crate::compile::syntax_rules::strip(obj)), ctx),
         Obj::Macro(_) => out.push_str("#<macro>"),
         Obj::Template(t) if t.name.is_empty() => out.push_str("#<template>"),
         Obj::Template(t) => out.push_str(&format!("#<template {}>", t.name)),
+    }
+}
+
+/// The printed form of a port, e.g. `#<input-port stdin>` (as in s1).
+fn describe_port(port: &crate::io::PortKind) -> String {
+    use crate::io::PortKind::*;
+    match port {
+        Stdin => "#<input-port stdin>".to_string(),
+        Stdout => "#<output-port stdout>".to_string(),
+        Stderr => "#<output-port stderr>".to_string(),
+        StringPortInput { .. } => "#<input-port string>".to_string(),
+        StringPortOutput { .. } => "#<output-port string>".to_string(),
+        BytevectorInput { .. } => "#<binary-input-port bytevector>".to_string(),
+        BytevectorOutput { .. } => "#<binary-output-port bytevector>".to_string(),
+        FileOutput { name, binary: false, .. } => format!("#<output-port {:?}>", name),
+        FileOutput { name, binary: true, .. } => format!("#<binary-output-port {:?}>", name),
+        Closed { .. } => "#<closed-port>".to_string(),
     }
 }
 

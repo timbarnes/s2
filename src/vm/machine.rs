@@ -20,9 +20,9 @@
 //! happens in a call or between two of them, so these are enough. There,
 //! every live value is in the roots `safepoint` passes to the heap.
 
-use crate::builtins::{PrimFn, Primitive};
+use crate::builtins::{PrimFn, Primitive, standard_ports};
 use crate::globals::{Env, cell_name, cell_value};
-use crate::heap::{GcRef, Heap, Obj};
+use crate::heap::{GcRef, Heap, Obj, list_to_vec};
 use crate::printer::print_value;
 use crate::value::Value;
 use crate::vm::op::{Op, Template};
@@ -34,10 +34,11 @@ struct Frame {
     fp: usize,
 }
 
-#[derive(Default)]
 pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
+    /// The current input, output and error ports (`builtins::port`).
+    pub ports: [Value; 3],
 }
 
 /// The template and free variables of a closure.
@@ -75,6 +76,10 @@ fn boxed_name(t: &Template, ip: usize) -> &str {
 }
 
 impl Vm {
+    pub fn new(heap: &mut Heap) -> Vm {
+        Vm { stack: Vec::new(), frames: Vec::new(), ports: standard_ports(heap) }
+    }
+
     /// The number of frames waiting for a callee to return.
     pub fn frame_depth(&self) -> usize {
         self.frames.len()
@@ -200,45 +205,59 @@ impl Vm {
                 Op::Call(argc) => {
                     self.safepoint(heap, env, closure);
                     let base = self.stack.len() - argc as usize - 1;
-                    let f = self.stack[base];
-                    match f.as_obj().map(|o| &o.kind) {
-                        Some(Obj::Closure { template, free: captured }) => {
-                            let callee = template_of(*template);
-                            self.bind_arguments(heap, callee, base)?;
-                            self.frames.push(Frame { closure, ip, fp });
-                            closure = f.as_ref().unwrap();
-                            (t, free) = (callee, captured);
-                            ip = 0;
-                            fp = base + 1;
+                    loop {
+                        let f = self.stack[base];
+                        match f.as_obj().map(|o| &o.kind) {
+                            Some(Obj::Closure { template, free: captured }) => {
+                                let callee = template_of(*template);
+                                self.bind_arguments(heap, callee, base)?;
+                                self.frames.push(Frame { closure, ip, fp });
+                                closure = f.as_ref().unwrap();
+                                (t, free) = (callee, captured);
+                                ip = 0;
+                                fp = base + 1;
+                            }
+                            Some(Obj::Primitive(p)) if matches!(p.f, PrimFn::Apply) => {
+                                self.spread_apply(base)?;
+                                continue;
+                            }
+                            Some(Obj::Primitive(p)) => {
+                                let result = self.call_primitive(heap, env, p, base)?;
+                                self.stack.truncate(base);
+                                self.stack.push(result);
+                            }
+                            _ => return Err(format!("not a procedure: {}", print_value(f))),
                         }
-                        Some(Obj::Primitive(p)) => {
-                            let result = self.call_primitive(heap, env, p, base)?;
-                            self.stack.truncate(base);
-                            self.stack.push(result);
-                        }
-                        _ => return Err(format!("not a procedure: {}", print_value(f))),
+                        break;
                     }
                 }
                 Op::TailCall(argc) => {
                     self.safepoint(heap, env, closure);
                     let base = self.stack.len() - argc as usize - 1;
-                    let f = self.stack[base];
-                    match f.as_obj().map(|o| &o.kind) {
-                        Some(Obj::Closure { template, free: captured }) => {
-                            // Slide the callee and its arguments down to
-                            // where the current procedure's callee slot is.
-                            self.stack.drain(fp - 1..base);
-                            let callee = template_of(*template);
-                            self.bind_arguments(heap, callee, fp - 1)?;
-                            closure = f.as_ref().unwrap();
-                            (t, free) = (callee, captured);
-                            ip = 0;
+                    loop {
+                        let f = self.stack[base];
+                        match f.as_obj().map(|o| &o.kind) {
+                            Some(Obj::Closure { template, free: captured }) => {
+                                // Slide the callee and its arguments down to
+                                // where the current procedure's callee slot is.
+                                self.stack.drain(fp - 1..base);
+                                let callee = template_of(*template);
+                                self.bind_arguments(heap, callee, fp - 1)?;
+                                closure = f.as_ref().unwrap();
+                                (t, free) = (callee, captured);
+                                ip = 0;
+                            }
+                            Some(Obj::Primitive(p)) if matches!(p.f, PrimFn::Apply) => {
+                                self.spread_apply(base)?;
+                                continue;
+                            }
+                            Some(Obj::Primitive(p)) => {
+                                let result = self.call_primitive(heap, env, p, base)?;
+                                do_return!(result);
+                            }
+                            _ => return Err(format!("not a procedure: {}", print_value(f))),
                         }
-                        Some(Obj::Primitive(p)) => {
-                            let result = self.call_primitive(heap, env, p, base)?;
-                            do_return!(result);
-                        }
-                        _ => return Err(format!("not a procedure: {}", print_value(f))),
+                        break;
                     }
                 }
                 Op::Return => do_return!(self.stack.pop().unwrap()),
@@ -253,7 +272,8 @@ impl Vm {
     fn safepoint(&self, heap: &mut Heap, env: &Env, closure: GcRef) {
         if heap.needs_gc() {
             let frames = self.frames.iter().map(|f| Value::obj(f.closure));
-            heap.collect(self.stack.iter().copied().chain(frames).chain([Value::obj(closure)]).chain(env.roots()));
+            let roots = self.stack.iter().chain(&self.ports).copied().chain(frames).chain([Value::obj(closure)]);
+            heap.collect(roots.chain(env.roots()));
         }
     }
 
@@ -275,6 +295,21 @@ impl Vm {
         Ok(())
     }
 
+    /// `(apply f arg ... list)`, with `apply` in slot `base`: replace it
+    /// with `f arg ... element ...`, ready to be called the same way. So a
+    /// tail call to `apply` is a tail call to `f`.
+    fn spread_apply(&mut self, base: usize) -> Result<(), String> {
+        let n = self.stack.len() - base - 1;
+        if n < 2 {
+            return Err(format!("apply: wrong number of arguments: {}", n));
+        }
+        let list = self.stack.pop().unwrap();
+        let items = list_to_vec(list).ok_or_else(|| format!("apply: not a proper list: {}", print_value(list)))?;
+        self.stack.remove(base);
+        self.stack.extend(items);
+        Ok(())
+    }
+
     /// Call primitive `p`, whose arguments are above slot `base`.
     fn call_primitive(&mut self, heap: &mut Heap, env: &mut Env, p: &Primitive, base: usize) -> Result<Value, String> {
         let n = self.stack.len() - base - 1;
@@ -287,6 +322,7 @@ impl Vm {
                 let args = self.stack[base + 1..].to_vec();
                 f(self, heap, env, &args)
             }
+            PrimFn::Apply => unreachable!("apply is spread before the call"),
         }
     }
 }

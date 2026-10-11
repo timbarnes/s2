@@ -1,0 +1,114 @@
+;; port_tests.scm: ports and I/O (R7RS 6.13), and the printer through them.
+;; Ported from s1's scheme/port_tests.scm. Left out until P7: error
+;; messages and file errors (guard), the current ports as parameters
+;; (parameterize, with-output-to-file, with-input-from-file). Left out for
+;; good: s1's procedure-source and its printing of special forms, and its
+;; naming of an anonymous procedure after the first variable it is defined
+;; to (s2 names procedures when they are compiled, P2). The file
+;; tests use call-with-output-file instead of with-output-to-file.
+(display "          === Testing ports ===")
+(newline)
+
+(define (written obj)
+  (let ((out (open-output-string))) (write obj out) (get-output-string out)))
+(define (displayed obj)
+  (let ((out (open-output-string))) (display obj out) (get-output-string out)))
+
+;; --- string ports keep their state (they used to be copied)
+(test-equal "abc \"x\"!\n"
+    (let ((out (open-output-string)))
+      (write 'abc out) (display " " out) (write "x" out) (write-char #\! out) (newline out)
+      (get-output-string out))
+    "output accumulates in a string port")
+(test-equal '((a b) 42 "s" #t)
+    (let ((in (open-input-string "(a b) 42 \"s\"")))
+      (list (read in) (read in) (read in) (eof-object? (read in))))
+    "successive reads from one string port")
+(test-equal '("line one" #\l "ine two" "last" #t)
+    (let ((in (open-input-string "line one\nline two\r\nlast")))
+      (list (read-line in) (peek-char in) (begin (read-char in) (read-line in)) (read-line in)
+            (eof-object? (read-line in))))
+    "read-line handles \\n and \\r\\n")
+(test-equal '("ab" "cdef" #t)
+    (let ((in (open-input-string "abcdef")))
+      (list (read-string 2 in) (read-string 10 in) (eof-object? (read-string 3 in))))
+    "read-string")
+(test-equal "el" (let ((out (open-output-string))) (write-string "hello" out 1 3) (get-output-string out))
+    "write-string with a range")
+
+;; --- predicates and closing
+(test-equal '(#t #t #t #f #t)
+    (let ((in (open-input-string "x")) (out (open-output-string)))
+      (list (input-port? in) (output-port? out) (textual-port? out) (binary-port? out) (input-port-open? in)))
+    "port predicates")
+
+;; --- current ports are parameters
+(test-equal #t (output-port? (current-error-port)) "current-error-port")
+
+;; --- files
+(define port-test-file "target/s2-port-test.tmp")
+(call-with-output-file port-test-file
+  (lambda (out) (display "file text" out) (newline out) (write '(1 "two") out)))
+(test-equal '("file text" (1 "two"))
+    (call-with-input-file port-test-file (lambda (in) (let* ((line (read-line in)) (datum (read in))) (list line datum))))
+    "call-with-output-file and call-with-input-file")
+(test-equal "file text"
+    (call-with-input-file port-test-file read-line)
+    "call-with-input-file")
+(test-equal #t (file-exists? port-test-file) "file-exists?")
+(delete-file port-test-file)
+(test-equal #f (file-exists? port-test-file) "delete-file")
+
+;; --- binary ports
+(test-equal '(1 1 #u8(2 3) #u8(4 5) #t)
+    (let ((in (open-input-bytevector #u8(1 2 3 4 5))))
+      (list (peek-u8 in) (read-u8 in) (read-bytevector 2 in) (read-bytevector 9 in) (eof-object? (read-u8 in))))
+    "reading a bytevector port")
+(test-equal '(2 #u8(1 6 7 4 5))
+    (let ((bv (bytevector 1 2 3 4 5)))
+      (list (read-bytevector! bv (open-input-bytevector #u8(6 7 8 9 10)) 1 3) bv))
+    "read-bytevector!")
+(test-equal #u8(1 3 4)
+    (let ((out (open-output-bytevector)))
+      (write-u8 1 out) (write-bytevector #u8(1 2 3 4 5) out 2 4) (get-output-bytevector out))
+    "writing a bytevector port")
+(let ((p (open-binary-output-file port-test-file)))
+  (write-bytevector #u8(0 255 10) p)
+  (close-port p))
+(test-equal #u8(0 255 10) (call-with-port (open-binary-input-file port-test-file) (lambda (p) (read-bytevector 10 p)))
+    "binary files round trip")
+(delete-file port-test-file)
+
+;; --- the printer, now observable from Scheme
+(test-equal "(\"a\\\"b\\\\c\\nd\" #\\space #\\x1)" (written (list "a\"b\\c\nd" #\space (integer->char 1)))
+    "write escapes strings and names characters")
+(test-equal "(a\"b c)" (displayed (list "a\"b" #\c)) "display shows strings and characters raw")
+(test-equal "(|a b| |2| || nil)" (written (list (string->symbol "a b") (string->symbol "2") (string->symbol "") 'nil))
+    "write puts bars on symbols that need them")
+(test-equal "(2.0 1.0e+21 -0.0 +inf.0 1/3)" (written (list 2.0 1e21 -0.0 (/ 1.0 0) 1/3)) "write of numbers")
+(define cyc (list 1 2))
+(set-cdr! (cdr cyc) cyc)
+(test-equal "#0=(1 2 . #0#)" (written cyc) "write labels a cycle")
+(test-equal "#0=(1 2 . #0#)" (displayed cyc) "display labels a cycle too")
+(define shared (list 1 2))
+(test-equal "((1 2) (1 2))" (written (list shared shared)) "write doesn't label acyclic sharing")
+(test-equal "(#0=(1 2) #0#)"
+    (let ((out (open-output-string))) (write-shared (list shared shared) out) (get-output-string out))
+    "write-shared labels shared structure")
+(test-equal "((1 2) (1 2))"
+    (let ((out (open-output-string))) (write-simple (list shared shared) out) (get-output-string out))
+    "write-simple never labels")
+(define self-vec (vector 1 2))
+(vector-set! self-vec 1 self-vec)
+(test-equal "#0=#(1 #0#)" (written self-vec) "write labels a cyclic vector")
+(test-equal #t (let ((x (read (open-input-string (written cyc))))) (eq? x (cddr x)))
+    "a written cycle reads back as a cycle")
+;; --- procedures and other opaque objects
+(define (printed-proc x) (+ x 1))
+(test-equal "#<procedure printed-proc>" (written printed-proc) "a defined procedure prints with its name")
+(test-equal "#<procedure loop>" (let loop ((i 0)) (if (< i 2) (loop (+ i 1)) (written loop)))
+    "named let names its procedure")
+(test-equal "#<procedure inner>" (let () (define (inner) 1) (written inner)) "internal definitions name procedures")
+(test-equal "(#<output-port string> #<input-port string>)"
+    (written (list (open-output-string) (open-input-string "")))
+    "ports print by kind")

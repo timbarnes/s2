@@ -93,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "mimalloc",
  "num-bigint",
+ "num-integer",
  "num-rational",
  "num-traits",
  "rustc-hash",

@@ -32,6 +32,7 @@ use rustc_hash::FxHashMap;
 
 use crate::builtins::Primitive;
 use crate::compile::syntax_rules::SyntaxRules;
+use crate::io::PortKind;
 use crate::sstring::SString;
 use crate::value::Value;
 use crate::vm::Template;
@@ -86,6 +87,14 @@ pub enum Obj {
     /// `letrec` init has run (03 §7, `analyze::boxed_variables`). Closures
     /// copy the box, so they share the variable. Never seen by Scheme code.
     Box(Cell<Value>),
+    /// An input or output port (R7RS §6.13). Port procedures change it in
+    /// place, so every reference sees the same position and state.
+    Port(RefCell<PortKind>),
+    /// A record type made by `define-record-type`: its name, and its field
+    /// names in order.
+    RecordType { name: Value, fields: Box<[Value]> },
+    /// An instance of a record type.
+    Record { rtype: GcRef, fields: Box<[Cell<Value>]> },
     /// A procedure written in Rust.
     Primitive(&'static Primitive),
     /// Compiled code (`vm/op.rs`). Templates are heap objects so that a
@@ -261,6 +270,18 @@ impl Heap {
         self.alloc(Obj::Macro(rules)).as_ref().unwrap()
     }
 
+    pub fn port(&mut self, port: PortKind) -> Value {
+        self.alloc(Obj::Port(RefCell::new(port)))
+    }
+
+    pub fn record_type(&mut self, name: Value, fields: Vec<Value>) -> Value {
+        self.alloc(Obj::RecordType { name, fields: fields.into() })
+    }
+
+    pub fn record(&mut self, rtype: GcRef, fields: Vec<Value>) -> Value {
+        self.alloc(Obj::Record { rtype, fields: fields.into_iter().map(Cell::new).collect() })
+    }
+
     pub fn make_box(&mut self, v: Value) -> Value {
         self.alloc(Obj::Box(Cell::new(v)))
     }
@@ -310,6 +331,14 @@ impl Marker {
                 }
                 Obj::Vector(items) => items.iter().for_each(|c| self.value(c.get())),
                 Obj::Box(value) => self.value(value.get()),
+                Obj::RecordType { name, fields } => {
+                    self.value(*name);
+                    fields.iter().for_each(|&f| self.value(f));
+                }
+                Obj::Record { rtype, fields } => {
+                    self.obj(*rtype);
+                    fields.iter().for_each(|f| self.value(f.get()));
+                }
                 Obj::Alias { original, .. } => self.value(*original),
                 Obj::Macro(m) => {
                     m.ellipsis.iter().chain(&m.literals).for_each(|&r| self.obj(r));
@@ -327,7 +356,7 @@ impl Marker {
                     self.obj(*template);
                     free.iter().for_each(|&v| self.value(v));
                 }
-                Obj::Symbol(_) | Obj::Str(_) | Obj::Bytevector(_) | Obj::BigInt(_) | Obj::Rational(_) | Obj::Primitive(_) => {}
+                Obj::Symbol(_) | Obj::Str(_) | Obj::Bytevector(_) | Obj::BigInt(_) | Obj::Rational(_) | Obj::Primitive(_) | Obj::Port(_) => {}
             }
         }
     }
@@ -344,23 +373,65 @@ pub fn eqv(a: Value, b: Value) -> bool {
 }
 
 /// `equal?`: `eqv?`, or pairs, strings, vectors and bytevectors with equal
-/// contents.
-// ponytail: recursive, and loops on cyclic data. R7RS requires equal? to
-// terminate on cycles; P6 does that when it ports s1's equal?.
+/// contents. Terminates on cyclic data, as R7RS requires: after many steps
+/// it starts recording which pairs of nodes are being compared, and treats
+/// meeting one again as equal (that comparison is already under way higher
+/// up). Forked from s1's `gc::equal`.
 pub fn equal(a: Value, b: Value) -> bool {
-    if eqv(a, b) {
-        return true;
+    equal_with(a, b, &mut EqualState { steps: 0, seen: None })
+}
+
+/// Cycle detection for `equal`.
+struct EqualState {
+    /// Node pairs compared so far.
+    steps: usize,
+    /// Node pairs under comparison; only kept once `steps` is large.
+    seen: Option<rustc_hash::FxHashSet<(GcRef, GcRef)>>,
+}
+
+/// Steps after which `equal` starts tracking visited node pairs.
+const EQUAL_TRACKING_AFTER: usize = 10_000;
+
+impl EqualState {
+    /// Note a visit to the node pair (a, b); false if it was seen before.
+    fn first_visit(&mut self, a: Value, b: Value) -> bool {
+        self.steps += 1;
+        if self.steps > EQUAL_TRACKING_AFTER {
+            let seen = self.seen.get_or_insert_with(Default::default);
+            return seen.insert((a.as_ref().unwrap(), b.as_ref().unwrap()));
+        }
+        true
     }
-    match (a.as_obj().map(|o| &o.kind), b.as_obj().map(|o| &o.kind)) {
-        (Some(Obj::Pair { car: a1, cdr: a2 }), Some(Obj::Pair { car: b1, cdr: b2 })) => {
-            equal(a1.get(), b1.get()) && equal(a2.get(), b2.get())
+}
+
+/// `equal` with explicit state; loops on the cdr so long lists don't
+/// recurse.
+fn equal_with(mut a: Value, mut b: Value, st: &mut EqualState) -> bool {
+    loop {
+        match (a.as_obj().map(|o| &o.kind), b.as_obj().map(|o| &o.kind)) {
+            (Some(Obj::Pair { car: a1, cdr: d1 }), Some(Obj::Pair { car: a2, cdr: d2 })) => {
+                if !st.first_visit(a, b) {
+                    return true;
+                }
+                if !equal_with(a1.get(), a2.get(), st) {
+                    return false;
+                }
+                a = d1.get();
+                b = d2.get();
+            }
+            (Some(Obj::Vector(x)), Some(Obj::Vector(y))) => {
+                if x.len() != y.len() {
+                    return false;
+                }
+                if !st.first_visit(a, b) {
+                    return true;
+                }
+                return x.iter().zip(y.iter()).all(|(p, q)| equal_with(p.get(), q.get(), st));
+            }
+            (Some(Obj::Str(x)), Some(Obj::Str(y))) => return *x.borrow() == *y.borrow(),
+            (Some(Obj::Bytevector(x)), Some(Obj::Bytevector(y))) => return x == y,
+            _ => return eqv(a, b),
         }
-        (Some(Obj::Str(x)), Some(Obj::Str(y))) => *x.borrow() == *y.borrow(),
-        (Some(Obj::Vector(x)), Some(Obj::Vector(y))) => {
-            x.len() == y.len() && x.iter().zip(y.iter()).all(|(p, q)| equal(p.get(), q.get()))
-        }
-        (Some(Obj::Bytevector(x)), Some(Obj::Bytevector(y))) => x == y,
-        _ => false,
     }
 }
 

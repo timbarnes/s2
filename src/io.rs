@@ -1,10 +1,10 @@
-//! The low-level side of ports: [`PortKind`], character input with
-//! push-back, and the [`FileTable`] of open output files.
+//! The low-level side of ports: [`PortKind`] and character input with
+//! push-back. The Scheme port procedures are in `builtins/port.rs`.
 //!
-//! Forked from s1/src/io.rs at bc6f118, unchanged. The Scheme port
-//! procedures that use these come in P6.
+//! Forked from s1/src/io.rs at bc6f118. One change: an output file port
+//! owns its `File`, instead of an id in s1's table of open files, so
+//! closing the port (or collecting it) closes the file.
 
-use rustc_hash::FxHashMap as HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 
@@ -15,8 +15,7 @@ use std::cell::Cell;
 /// A port is a heap object (`SchemeValue::Port`) and port procedures change
 /// it in place, so every reference to the same port sees the same position,
 /// accumulated output and open/closed state. Textual input files are read
-/// whole into a `StringPortInput`, binary ones into a `BytevectorInput`;
-/// output files write through the `FileTable`.
+/// whole into a `StringPortInput`, binary ones into a `BytevectorInput`.
 #[derive(Debug)]
 pub enum PortKind {
     /// Standard input
@@ -53,12 +52,13 @@ pub enum PortKind {
         /// The bytes written so far.
         bytes: Vec<u8>,
     },
-    /// Output to a file in the `FileTable`, textual or binary
+    /// Output to a file, textual or binary. Writes go straight to the
+    /// file, unbuffered, so nothing is lost if the program exits without
+    /// closing the port.
     FileOutput {
         /// The file name, for printing the port.
         name: String,
-        /// The file's `FileTable` id.
-        id: usize,
+        file: File,
         /// Whether it is a binary port.
         binary: bool,
     },
@@ -226,62 +226,6 @@ fn utf8_char_width(first: u8) -> usize {
         0xE0..=0xEF => 3,
         0xF0..=0xF7 => 4,
         _ => 1,
-    }
-}
-
-/// Manages open file handles for file ports.
-///
-/// The file table maintains a mapping from file IDs to actual file handles,
-/// allowing multiple file ports to reference the same underlying file
-/// and ensuring proper cleanup when files are closed.
-///
-pub struct FileTable {
-    /// Next available file ID
-    next_id: usize,
-    /// Mapping from file IDs to file handles
-    files: HashMap<usize, File>,
-}
-
-impl FileTable {
-    /// Create a new empty file table.
-    pub fn new() -> Self {
-        Self {
-            next_id: 1,
-            files: HashMap::default(),
-        }
-    }
-
-    /// Open a file and return its ID.
-    ///
-    /// The file ID can be used to create file ports and access the file handle.
-    /// Files are opened in read mode if `write` is `false`, or write mode if `write` is `true`.
-    ///
-    pub fn open_file(&mut self, name: &str, write: bool) -> io::Result<usize> {
-        let file = if write {
-            File::create(name)?
-        } else {
-            File::open(name)?
-        };
-        let id = self.next_id;
-        self.next_id += 1;
-        self.files.insert(id, file);
-        Ok(id)
-    }
-
-    /// Close a file by its ID.
-    ///
-    /// The file handle is removed from the table and the underlying file is closed.
-    ///
-    pub fn close_file(&mut self, id: usize) {
-        self.files.remove(&id);
-    }
-
-    /// Get a mutable reference to a file handle by ID.
-    ///
-    /// Returns `None` if the file ID is not found in the table.
-    ///
-    pub fn get(&mut self, id: usize) -> Option<&mut File> {
-        self.files.get_mut(&id)
     }
 }
 

@@ -4,7 +4,7 @@ Planning documents, written 2026-10-10, before any code exists. They follow
 the practice s1 already uses (`../s1/design/*.md`): work out the design on
 paper, measure where possible, then implement in small steps.
 
-**Status:** P0-P5 done 2026-10-10 ([P0](phases/P0.md), [P1](phases/P1.md), [P2](phases/P2.md), [P3](phases/P3.md), [P4](phases/P4.md), [P5](phases/P5.md)). Next: P6.
+**Status:** P0-P6 done 2026-10-10 ([P0](phases/P0.md), [P1](phases/P1.md), [P2](phases/P2.md), [P3](phases/P3.md), [P4](phases/P4.md), [P5](phases/P5.md), [P6](phases/P6.md)). Next: P7.
 
 ## Goals
 
