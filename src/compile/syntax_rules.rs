@@ -131,9 +131,11 @@ pub struct SyntaxRules {
     /// (pattern, template) pairs, in order.
     pub rules: Vec<(Value, Value)>,
     /// The definition scope: how many of the expander's frames were
-    /// visible where the macro was defined (0 at top level). The aliases
-    /// an expansion makes resolve there.
+    /// visible where the macro was defined (0 at top level), over the
+    /// top-level environment `env`. The aliases an expansion makes resolve
+    /// there.
     pub depth: u32,
+    pub env: GcRef,
 }
 
 /// What a pattern variable matched: one form, or a sequence per ellipsis.
@@ -350,7 +352,7 @@ impl SyntaxRules {
             return match binds.get(&id) {
                 Some(Match::One(v)) => Ok(*v),
                 Some(Match::Many(_)) => Err(format!("syntax-rules: pattern variable {} used without an ellipsis", print_value(template))),
-                None => Ok(*renames.entry(id).or_insert_with(|| heap.alias(template, self.depth))),
+                None => Ok(*renames.entry(id).or_insert_with(|| heap.alias(template, self.depth, self.env))),
             };
         }
         match kind(template) {
@@ -471,7 +473,7 @@ fn template_vars(template: Value, binds: &FxHashMap<GcRef, Match>, out: &mut Vec
 
 /// Parse `(syntax-rules [ellipsis] (literal ...) (pattern template) ...)`,
 /// defined in a scope of `depth` frames, checking the rules are well formed.
-pub fn parse(form: Value, depth: u32) -> Result<SyntaxRules, String> {
+pub fn parse(form: Value, depth: u32, env: GcRef) -> Result<SyntaxRules, String> {
     let (parts, tail) = list_parts(form);
     if !tail.is_nil() || parts.len() < 2 {
         return Err("syntax-rules: expected (syntax-rules (literal ...) rule ...)".into());
@@ -487,7 +489,7 @@ pub fn parse(form: Value, depth: u32) -> Result<SyntaxRules, String> {
     let Some(literals) = literals.filter(|_| lit_tail.is_nil()) else {
         return Err("syntax-rules: literals must be a list of identifiers".into());
     };
-    let mut sr = SyntaxRules { ellipsis, literals, rules: Vec::new(), depth };
+    let mut sr = SyntaxRules { ellipsis, literals, rules: Vec::new(), depth, env };
     for &rule in rules {
         let (pt, rule_tail) = list_parts(rule);
         if pt.len() != 2 || !rule_tail.is_nil() {
@@ -585,7 +587,8 @@ mod tests {
     fn expand(src: &str, use_src: &str) -> Result<String, String> {
         let mut heap = Heap::new();
         let form = read(&mut heap, src);
-        let sr = parse(form, 0)?;
+        let env = heap.environment(crate::globals::Env::empty(true));
+        let sr = parse(form, 0, env)?;
         let use_form = read(&mut heap, use_src);
         let (template, binds) = sr.match_use(use_form, &|a, b| strip(a) == strip(b))?;
         let out = sr.instantiate(&mut heap, template, &binds)?;
@@ -595,7 +598,8 @@ mod tests {
     #[test]
     fn substitutes_and_renames() {
         let mut heap = Heap::new();
-        let sr = parse(read(&mut heap, "(syntax-rules () ((_ e) (t e t)))"), 0).unwrap();
+        let env = heap.environment(crate::globals::Env::empty(true));
+        let sr = parse(read(&mut heap, "(syntax-rules () ((_ e) (t e t)))"), 0, env).unwrap();
         let use_form = read(&mut heap, "(m t)");
         let (template, binds) = sr.match_use(use_form, &|_, _| false).unwrap();
         let (items, _) = list_parts(sr.instantiate(&mut heap, template, &binds).unwrap());
@@ -651,7 +655,8 @@ mod tests {
         let plain = read(&mut heap, "(a 1)");
         assert!(strip_datum(&mut heap, plain).eq(plain), "no aliases: returned as is");
         let a = heap.intern("a");
-        let renamed = heap.alias(a, 0);
+        let env = heap.environment(crate::globals::Env::empty(true));
+        let renamed = heap.alias(a, 0, env);
         let vec = heap.vector(vec![renamed]);
         let tail = heap.cons(renamed, renamed);
         let datum = heap.list(vec![renamed, vec, tail]);

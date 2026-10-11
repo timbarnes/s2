@@ -21,6 +21,7 @@ mod port;
 mod predicate;
 mod record;
 mod string;
+mod system;
 mod vector;
 
 use std::cell::{Cell, RefCell};
@@ -33,6 +34,7 @@ use crate::value::Value;
 use crate::vm::Vm;
 
 pub use port::standard_ports;
+pub use system::set_command_line;
 
 /// What a builtin returns when it fails. The VM raises it as an error
 /// object (`Obj::Error`), which `guard` can catch. Most errors are just a
@@ -79,7 +81,7 @@ pub type BuiltinFn = fn(&mut Heap, &[Value]) -> Result<Value, Error>;
 // ponytail: returns a value, which is all these need. P7 changes this to
 // return an `Action` (03 §11), so `eval` can tail-call the code it compiles
 // and `%call/cc` can resume a continuation.
-pub type VmFn = fn(&mut Vm, &mut Heap, &mut Env, &[Value]) -> Result<Value, Error>;
+pub type VmFn = fn(&mut Vm, &mut Heap, &[Value]) -> Result<Value, Error>;
 
 pub enum PrimFn {
     Builtin(BuiltinFn),
@@ -89,6 +91,9 @@ pub enum PrimFn {
     Apply,
     CallCc,
     CallEc,
+    /// `eval`, which the call instruction carries out too: it compiles the
+    /// expression and calls the result in place of itself.
+    Eval,
 }
 
 /// A procedure written in Rust: its name, its argument count, and its code.
@@ -100,15 +105,15 @@ pub struct Primitive {
     pub f: PrimFn,
 }
 
-const fn prim(name: &'static str, min: usize, max: Option<usize>, f: BuiltinFn) -> Primitive {
+pub(crate) const fn prim(name: &'static str, min: usize, max: Option<usize>, f: BuiltinFn) -> Primitive {
     Primitive { name, min, max, f: PrimFn::Builtin(f) }
 }
 
-const fn vm_prim(name: &'static str, min: usize, max: Option<usize>, f: VmFn) -> Primitive {
+pub(crate) const fn vm_prim(name: &'static str, min: usize, max: Option<usize>, f: VmFn) -> Primitive {
     Primitive { name, min, max, f: PrimFn::Vm(f) }
 }
 
-/// Define every builtin in `env`.
+/// Define every builtin in `env`, the system environment.
 pub fn install(heap: &mut Heap, env: &mut Env) {
     for table in [
         control::PRIMITIVES,
@@ -120,6 +125,8 @@ pub fn install(heap: &mut Heap, env: &mut Env) {
         vector::PRIMITIVES,
         record::PRIMITIVES,
         port::PRIMITIVES,
+        system::PRIMITIVES,
+        crate::libraries::PRIMITIVES,
     ] {
         for p in table {
             let v = heap.primitive(p);
@@ -212,8 +219,11 @@ mod tests {
     #[test]
     fn no_primitive_panics_on_bad_arguments() {
         let mut heap = Heap::new();
-        let mut env = Env::new(&mut heap);
-        install(&mut heap, &mut env);
+        let core = Env::with_core_forms(&mut heap);
+        let system = heap.environment(core);
+        install(&mut heap, &mut crate::globals::env_of(system).borrow_mut());
+        heap.system = Some(system);
+        heap.interaction = Some(system);
         let samples = [
             Value::fixnum(-1).unwrap(),
             Value::fixnum(3).unwrap(),
@@ -224,7 +234,9 @@ mod tests {
             Value::TRUE,
             Value::NIL,
             Value::EOF,
-            heap.string("ab"),
+            // A string that is also a harmless file name, since
+            // open-output-file and delete-file get it too.
+            heap.string("target/s2-builtin-test-sample"),
             heap.intern("sym"),
             heap.list(vec![Value::fixnum(1).unwrap(), Value::fixnum(2).unwrap()]),
             heap.vector(vec![Value::char('a')]),
@@ -245,8 +257,8 @@ mod tests {
                         let args: Vec<Value> = (0..n).map(|i| samples[(start + i * 5) % samples.len()]).collect();
                         let _ = match p.f {
                             PrimFn::Builtin(f) => f(&mut heap, &args),
-                            PrimFn::Vm(f) => f(&mut vm, &mut heap, &mut env, &args),
-                            PrimFn::Apply | PrimFn::CallCc | PrimFn::CallEc => continue,
+                            PrimFn::Vm(f) => f(&mut vm, &mut heap, &args),
+                            PrimFn::Apply | PrimFn::CallCc | PrimFn::CallEc | PrimFn::Eval => continue,
                         };
                     }
                 }

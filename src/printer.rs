@@ -243,6 +243,7 @@ fn print_into(out: &mut String, v: Value, ctx: &mut Ctx) {
             _ => unreachable!(),
         },
         Obj::Box(_) => out.push_str("#<box>"),
+        Obj::Environment(_) => out.push_str("#<environment>"),
         Obj::Continuation { .. } | Obj::Escape { .. } => out.push_str("#<continuation>"),
         // Several values print separated by spaces; the REPL prints them
         // one per line instead.

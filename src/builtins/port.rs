@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::io::Write;
 
 use super::{Error, ErrorKind, err, Primitive, bytevector_arg, char_arg, expected, fixnum, index_arg, kind, prim, range_args, string_arg, vm_prim};
-use crate::globals::{Env, TopBinding, cell_value};
+use crate::globals::{TopBinding, cell_value, env_of};
 use crate::heap::{Heap, Obj};
 use crate::io::{PortKind, new_string_port_input};
 use crate::printer::{display_value, print_value, write_shared_value, write_simple_value};
@@ -34,9 +34,9 @@ pub fn standard_ports(heap: &mut Heap) -> [Value; 3] {
 }
 
 pub static PRIMITIVES: &[Primitive] = &[
-    vm_prim("current-input-port", 0, Some(2), |vm, h, e, a| current_port(vm, h, e, a, INPUT, "%check-input-port")),
-    vm_prim("current-output-port", 0, Some(2), |vm, h, e, a| current_port(vm, h, e, a, OUTPUT, "%check-output-port")),
-    vm_prim("current-error-port", 0, Some(2), |vm, h, e, a| current_port(vm, h, e, a, ERROR, "%check-output-port")),
+    vm_prim("current-input-port", 0, Some(2), |vm, h, a| current_port(vm, h, a, INPUT, "%check-input-port")),
+    vm_prim("current-output-port", 0, Some(2), |vm, h, a| current_port(vm, h, a, OUTPUT, "%check-output-port")),
+    vm_prim("current-error-port", 0, Some(2), |vm, h, a| current_port(vm, h, a, ERROR, "%check-output-port")),
     // The current ports' converters, which check what parameterize binds.
     prim("%check-input-port", 1, Some(1), |_, a| match kind(a[0]) {
         Some(Obj::Port(p)) if p.borrow().is_input() => Ok(a[0]),
@@ -94,7 +94,7 @@ pub static PRIMITIVES: &[Primitive] = &[
         std::fs::remove_file(&name).map_err(|e| file_error(format!("delete-file: could not delete file: {}", e), a[0]))?;
         Ok(Value::UNSPECIFIED)
     }),
-    vm_prim("read", 0, Some(1), |vm, h, _, a| {
+    vm_prim("read", 0, Some(1), |vm, h, a| {
         let p = port(current(vm, a, 0, INPUT), "read")?;
         let mut k = p.borrow_mut();
         let result = match &*k {
@@ -110,10 +110,10 @@ pub static PRIMITIVES: &[Primitive] = &[
             }
         }
     }),
-    vm_prim("read-char", 0, Some(1), |vm, _, _, a| Ok(char_or_eof(get_char(current(vm, a, 0, INPUT), "read-char", false)?))),
-    vm_prim("peek-char", 0, Some(1), |vm, _, _, a| Ok(char_or_eof(get_char(current(vm, a, 0, INPUT), "peek-char", true)?))),
+    vm_prim("read-char", 0, Some(1), |vm, _, a| Ok(char_or_eof(get_char(current(vm, a, 0, INPUT), "read-char", false)?))),
+    vm_prim("peek-char", 0, Some(1), |vm, _, a| Ok(char_or_eof(get_char(current(vm, a, 0, INPUT), "peek-char", true)?))),
     vm_prim("read-line", 0, Some(1), read_line),
-    vm_prim("read-string", 1, Some(2), |vm, h, _, a| {
+    vm_prim("read-string", 1, Some(2), |vm, h, a| {
         let k = index_arg(a[0], "read-string")?;
         let p = current(vm, a, 1, INPUT);
         let mut out = String::new();
@@ -125,7 +125,7 @@ pub static PRIMITIVES: &[Primitive] = &[
         }
         Ok(if out.is_empty() && k > 0 { Value::EOF } else { h.string(&out) })
     }),
-    vm_prim("char-ready?", 0, Some(1), |vm, _, _, a| {
+    vm_prim("char-ready?", 0, Some(1), |vm, _, a| {
         match &*port(current(vm, a, 0, INPUT), "char-ready?")?.borrow() {
             PortKind::StringPortInput { .. } => Ok(Value::TRUE),
             PortKind::Stdin => Ok(Value::FALSE),
@@ -133,31 +133,31 @@ pub static PRIMITIVES: &[Primitive] = &[
             _ => Err("char-ready?: not a textual input port".into()),
         }
     }),
-    vm_prim("write", 1, Some(2), |vm, _, _, a| put_str(current(vm, a, 1, OUTPUT), &print_value(a[0]), "write")),
-    vm_prim("write-shared", 1, Some(2), |vm, _, _, a| put_str(current(vm, a, 1, OUTPUT), &write_shared_value(a[0]), "write-shared")),
-    vm_prim("write-simple", 1, Some(2), |vm, _, _, a| put_str(current(vm, a, 1, OUTPUT), &write_simple_value(a[0]), "write-simple")),
-    vm_prim("display", 1, Some(2), |vm, _, _, a| put_str(current(vm, a, 1, OUTPUT), &display_value(a[0]), "display")),
-    vm_prim("newline", 0, Some(1), |vm, _, _, a| put_str(current(vm, a, 0, OUTPUT), "\n", "newline")),
-    vm_prim("write-char", 1, Some(2), |vm, _, _, a| {
+    vm_prim("write", 1, Some(2), |vm, _, a| put_str(current(vm, a, 1, OUTPUT), &print_value(a[0]), "write")),
+    vm_prim("write-shared", 1, Some(2), |vm, _, a| put_str(current(vm, a, 1, OUTPUT), &write_shared_value(a[0]), "write-shared")),
+    vm_prim("write-simple", 1, Some(2), |vm, _, a| put_str(current(vm, a, 1, OUTPUT), &write_simple_value(a[0]), "write-simple")),
+    vm_prim("display", 1, Some(2), |vm, _, a| put_str(current(vm, a, 1, OUTPUT), &display_value(a[0]), "display")),
+    vm_prim("newline", 0, Some(1), |vm, _, a| put_str(current(vm, a, 0, OUTPUT), "\n", "newline")),
+    vm_prim("write-char", 1, Some(2), |vm, _, a| {
         let c = char_arg(a[0], "write-char")?;
         put_str(current(vm, a, 1, OUTPUT), &c.to_string(), "write-char")
     }),
-    vm_prim("write-string", 1, Some(4), |vm, _, _, a| {
+    vm_prim("write-string", 1, Some(4), |vm, _, a| {
         let chars: Vec<char> = string_arg(a[0], "write-string")?.borrow().chars().collect();
         let (start, end) = range_args(a, 2, chars.len(), "write-string")?;
         put_str(current(vm, a, 1, OUTPUT), &chars[start..end].iter().collect::<String>(), "write-string")
     }),
-    vm_prim("write-u8", 1, Some(2), |vm, _, _, a| {
+    vm_prim("write-u8", 1, Some(2), |vm, _, a| {
         let b = a[0].as_fixnum().and_then(|n| u8::try_from(n).ok()).ok_or_else(|| expected("write-u8", "a byte (0 to 255)", a[0]))?;
         put_bytes(current(vm, a, 1, OUTPUT), &[b], "write-u8")
     }),
-    vm_prim("write-bytevector", 1, Some(4), |vm, _, _, a| {
+    vm_prim("write-bytevector", 1, Some(4), |vm, _, a| {
         let bv = bytevector_arg(a[0], "write-bytevector")?;
         let (start, end) = range_args(a, 2, bv.len(), "write-bytevector")?;
         let bytes: Vec<u8> = bv[start..end].iter().map(|b| b.get()).collect();
         put_bytes(current(vm, a, 1, OUTPUT), &bytes, "write-bytevector")
     }),
-    vm_prim("flush-output-port", 0, Some(1), |vm, _, _, a| {
+    vm_prim("flush-output-port", 0, Some(1), |vm, _, a| {
         match &mut *port(current(vm, a, 0, OUTPUT), "flush-output-port")?.borrow_mut() {
             PortKind::Stdout => std::io::stdout().flush().ok(),
             PortKind::Stderr => std::io::stderr().flush().ok(),
@@ -167,13 +167,13 @@ pub static PRIMITIVES: &[Primitive] = &[
         };
         Ok(Value::UNSPECIFIED)
     }),
-    vm_prim("read-u8", 0, Some(1), |vm, _, _, a| binary_read(current(vm, a, 0, INPUT), "read-u8", true)),
-    vm_prim("peek-u8", 0, Some(1), |vm, _, _, a| binary_read(current(vm, a, 0, INPUT), "peek-u8", false)),
-    vm_prim("u8-ready?", 0, Some(1), |vm, _, _, a| {
+    vm_prim("read-u8", 0, Some(1), |vm, _, a| binary_read(current(vm, a, 0, INPUT), "read-u8", true)),
+    vm_prim("peek-u8", 0, Some(1), |vm, _, a| binary_read(current(vm, a, 0, INPUT), "peek-u8", false)),
+    vm_prim("u8-ready?", 0, Some(1), |vm, _, a| {
         with_binary_input(current(vm, a, 0, INPUT), "u8-ready?", |_, _| ())?;
         Ok(Value::TRUE)
     }),
-    vm_prim("read-bytevector", 1, Some(2), |vm, h, _, a| {
+    vm_prim("read-bytevector", 1, Some(2), |vm, h, a| {
         let k = index_arg(a[0], "read-bytevector")?;
         let bytes = with_binary_input(current(vm, a, 1, INPUT), "read-bytevector", |bytes, pos| {
             let n = k.min(bytes.len() - *pos);
@@ -183,7 +183,7 @@ pub static PRIMITIVES: &[Primitive] = &[
         })?;
         Ok(if bytes.is_empty() && k > 0 { Value::EOF } else { h.bytevector(bytes) })
     }),
-    vm_prim("read-bytevector!", 1, Some(4), |vm, _, _, a| {
+    vm_prim("read-bytevector!", 1, Some(4), |vm, _, a| {
         let target = bytevector_arg(a[0], "read-bytevector!")?;
         let (start, end) = range_args(a, 2, target.len(), "read-bytevector!")?;
         let src = with_binary_input(current(vm, a, 1, INPUT), "read-bytevector!", |bytes, pos| {
@@ -214,12 +214,12 @@ fn port<'a>(v: Value, who: &str) -> Result<&'a RefCell<PortKind>, Error> {
 /// `(current-output-port)` and friends. `(p %param-converter)` returns the
 /// converter (the global `checker`), and `(p %param-set port)` sets it, for
 /// `parameterize`.
-fn current_port(vm: &mut Vm, heap: &mut Heap, env: &mut Env, args: &[Value], which: usize, checker: &str) -> Result<Value, Error> {
+fn current_port(vm: &mut Vm, heap: &mut Heap, args: &[Value], which: usize, checker: &str) -> Result<Value, Error> {
     match args {
         [] => Ok(vm.ports[which]),
         [m] if m.eq(heap.intern("%param-converter")) => {
             let name = heap.intern(checker).as_ref().unwrap();
-            match env.lookup(name) {
+            match env_of(heap.system.unwrap()).borrow().lookup(name) {
                 Some(TopBinding::Variable(cell)) => Ok(cell_value(cell).get()),
                 _ => Err(err!("{} is not defined", checker)),
             }
@@ -303,7 +303,7 @@ fn char_or_eof(c: Option<char>) -> Value {
 
 /// A line, without its terminator (`\n`, `\r` or `\r\n`); the eof object at
 /// the end of input.
-fn read_line(vm: &mut Vm, heap: &mut Heap, _: &mut Env, args: &[Value]) -> Result<Value, Error> {
+fn read_line(vm: &mut Vm, heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let p = current(vm, args, 0, INPUT);
     let mut line = String::new();
     let mut any = false;

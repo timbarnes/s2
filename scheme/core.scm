@@ -471,3 +471,33 @@
          (%case-lambda args clause ...)))
     ((_ args (r body ...) clause ...)
      (apply (lambda r body ...) args))))
+
+;;; ---------------------------------------------------------------------
+;;; Loading (R7RS §6.12, §5.6) and leaving (§6.14).
+
+;; Load a library file, for an import that needs one (src/libraries.rs):
+;; marked loaded first, so a library that imports itself can't loop. Its
+;; forms are evaluated in the interaction environment.
+(define (%load-library path)
+  (%library-file-loading path)
+  (for-each (lambda (form) (eval form (interaction-environment)))
+            (%read-library-file path)))
+
+;; What eval becomes when its expression imports a library whose file
+;; isn't loaded yet.
+(define (%load-then-eval path expr env)
+  (%load-library path)
+  (eval expr env))
+
+(define (load filename . env)
+  (let ((env (if (null? env) (interaction-environment) (car env))))
+    (for-each (lambda (form) (eval form env)) (%read-file-forms filename))))
+
+;; exit runs the after thunks of every dynamic-wind it is inside, then
+;; ends the process; emergency-exit doesn't.
+(define (exit . status)
+  (%do-winds %winders '())
+  (apply %exit status))
+
+(define (emergency-exit . status)
+  (apply %exit status))

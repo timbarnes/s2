@@ -4,7 +4,6 @@
 
 use super::{Error, ErrorKind, Primitive, PrimFn, err, expected, kind, prim, vm_prim};
 use crate::compile;
-use crate::globals::Env;
 use crate::heap::{Heap, Obj};
 use crate::value::Value;
 use crate::vm::Vm;
@@ -14,6 +13,7 @@ pub static PRIMITIVES: &[Primitive] = &[
     Primitive { name: "apply", min: 2, max: None, f: PrimFn::Apply },
     Primitive { name: "%call/cc", min: 1, max: Some(1), f: PrimFn::CallCc },
     Primitive { name: "%call/ec", min: 1, max: Some(1), f: PrimFn::CallEc },
+    Primitive { name: "eval", min: 2, max: Some(2), f: PrimFn::Eval },
     prim("procedure?", 1, Some(1), |_, a| {
         Ok(Value::bool(matches!(kind(a[0]), Some(Obj::Closure { .. } | Obj::Primitive(_) | Obj::Continuation { .. } | Obj::Escape { .. }))))
     }),
@@ -35,7 +35,7 @@ pub static PRIMITIVES: &[Primitive] = &[
     vm_prim("%abort", 1, Some(1), abort),
     vm_prim("dis", 1, Some(1), dis),
     // Like s1's %kont-depth: for tests that tail calls don't grow the stack.
-    vm_prim("%frame-depth", 0, Some(0), |vm, _, _, _| Ok(Value::fixnum(vm.frame_depth() as i64).unwrap())),
+    vm_prim("%frame-depth", 0, Some(0), |vm, _, _| Ok(Value::fixnum(vm.frame_depth() as i64).unwrap())),
 ];
 
 /// An error object's kind, message and irritants.
@@ -48,14 +48,15 @@ fn error_object(v: Value, who: &str) -> Result<(ErrorKind, Value, Value), Error>
 
 /// `(%abort obj)`: `raise` found no handler. End the top-level form with
 /// `obj` as its error, recording the backtrace first.
-fn abort(vm: &mut Vm, _: &mut Heap, _: &mut Env, args: &[Value]) -> Result<Value, Error> {
+fn abort(vm: &mut Vm, _: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     vm.record_backtrace();
     Err(Error { kind: ErrorKind::Uncaught, message: uncaught_message(args[0]), irritants: Vec::new() })
 }
 
-/// `(dis datum)`: compile `datum` as a top-level form for the current
+/// `(dis datum)`: compile `datum` as a top-level form for the interaction
 /// environment and print its disassembly, without running it.
-fn dis(_: &mut Vm, heap: &mut Heap, env: &mut Env, args: &[Value]) -> Result<Value, Error> {
+fn dis(_: &mut Vm, heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
+    let env = heap.interaction.unwrap();
     let template = compile::compile(heap, env, args[0]).map_err(|e| err!("{}", e))?;
     print!("{}", compile::disasm::disassemble(template));
     Ok(Value::UNSPECIFIED)

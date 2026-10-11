@@ -53,8 +53,9 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 echo '(%r7rs-summary)' > "$work/summary.scm"
 
-# ponytail: the suite's (import ...) header is not run: s2 has no libraries
-# until P8, when it comes back (as in s1's runner).
+# The suite's (import ...) header, run before every section with the real
+# import. (chibi test) is dropped: shim.scm, loaded after it, stands in for it.
+awk '/^\(import /, /^ *\)$/' "$suite" | grep -v '(chibi test)' > "$work/header.scm"
 
 # Split into one file per section. The outer (test-begin "R7RS") is dropped:
 # totals are summed here instead.
@@ -91,10 +92,11 @@ for f in "$work"/section-*.scm; do
     expected="$(expected_tests "$f")"
     echo ";;;; ==== $name" >> "$log"
     status=0
-    # s2 runs one file, so the shim, the section and the summary call are
-    # put together. s2 exits 1 if any form had an error, which is expected.
-    cat "$shim" "$f" "$work/summary.scm" > "$work/run.scm"
-    out="$(with_timeout "$S2_BIN" "$work/run.scm" 2>&1 </dev/null)" || status=$?
+    # s2 loads one file, so the header, shim, section and summary call are
+    # put together. With -f an error is reported and the next form runs;
+    # s2 then exits 1, which is expected.
+    cat "$work/header.scm" "$shim" "$f" "$work/summary.scm" > "$work/run.scm"
+    out="$(with_timeout "$S2_BIN" -f "$work/run.scm" 2>&1 </dev/null)" || status=$?
     printf '%s\n' "$out" >> "$log"
 
     summary="$(printf '%s\n' "$out" | grep '^SUMMARY ' | tail -n 1 || true)"

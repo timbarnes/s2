@@ -34,6 +34,9 @@
 //! These are raw: `dynamic-wind`, the user's `call/cc` and exceptions are
 //! written in Scheme on top of them (`scheme/core.scm`).
 //!
+//! - `eval` compiles its expression for its environment and calls the
+//!   result in place of itself, so `eval` in tail position is a tail call.
+//!
 //! **Errors are raised.** When an instruction or a builtin fails, the VM
 //! makes an error object and calls the Scheme procedure `%raise-error`
 //! with it, as if the failing instruction had been that call. So `guard`
@@ -41,7 +44,8 @@
 //! Only an error nobody handles comes out of `run`, through `%abort`.
 
 use crate::builtins::{Error, ErrorKind, PrimFn, Primitive, standard_ports};
-use crate::globals::{Env, TopBinding, cell_name, cell_value};
+use crate::compile;
+use crate::globals::{TopBinding, cell_name, cell_value, env_of};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
 use crate::printer::{display_value, print_value};
 use crate::value::Value;
@@ -148,16 +152,14 @@ impl Vm {
     }
 
     /// Run a top-level template (a procedure of no arguments) and return
-    /// its value. `env` is the environment it was compiled for, which VM
-    /// primitives such as `dis` need. An error nobody handles aborts the
-    /// whole form.
-    pub fn run(&mut self, heap: &mut Heap, env: &mut Env, template: GcRef) -> Result<Value, String> {
+    /// its value. An error nobody handles aborts the whole form.
+    pub fn run(&mut self, heap: &mut Heap, template: GcRef) -> Result<Value, String> {
         let closure = heap.closure(template, Box::new([]));
         self.stack.clear();
         self.frames.clear();
         self.backtrace.clear();
         self.stack.push(closure);
-        let result = self.execute(heap, env, closure.as_ref().unwrap());
+        let result = self.execute(heap, closure.as_ref().unwrap());
         if result.is_err() {
             self.stack.clear();
             self.frames.clear();
@@ -165,7 +167,7 @@ impl Vm {
         result
     }
 
-    fn execute(&mut self, heap: &mut Heap, env: &mut Env, mut closure: GcRef) -> Result<Value, String> {
+    fn execute(&mut self, heap: &mut Heap, mut closure: GcRef) -> Result<Value, String> {
         let (mut t, mut free) = parts(closure);
         let mut ip = 0;
         let mut fp = 1;
@@ -206,7 +208,7 @@ impl Vm {
         macro_rules! fail {
             ($run:lifetime, $e:expr) => {{
                 let e: Error = $e.into();
-                let Some(handler) = (e.kind != ErrorKind::Uncaught).then(|| raise_hook(heap, env)).flatten() else {
+                let Some(handler) = (e.kind != ErrorKind::Uncaught).then(|| system_procedure(heap, "%raise-error")).flatten() else {
                     return Err(e.message);
                 };
                 let message = heap.string(&e.message);
@@ -296,7 +298,7 @@ impl Vm {
                 }
                 Op::Call(argc) | Op::TailCall(argc) => {
                     let tail = matches!(op, Op::TailCall(_));
-                    self.safepoint(heap, env, closure);
+                    self.safepoint(heap, closure);
                     let base = self.stack.len() - argc as usize - 1;
                     // A loop, because apply, %call/cc and %call/ec rewrite
                     // the call into another one.
@@ -347,7 +349,39 @@ impl Vm {
                                     self.stack[base + 1] = k;
                                     continue;
                                 }
-                                _ => match self.call_primitive(heap, env, p, base) {
+                                PrimFn::Eval => {
+                                    let n = self.stack.len() - base - 1;
+                                    if n != 2 {
+                                        fail!('run, format!("eval: wrong number of arguments: {}", n));
+                                    }
+                                    let (expr, env) = (self.stack[base + 1], self.stack[base + 2]);
+                                    if !matches!(env.as_obj().map(|o| &o.kind), Some(Obj::Environment(_))) {
+                                        fail!('run, "eval: the second argument must be an environment");
+                                    }
+                                    match compile::compile(heap, env.as_ref().unwrap(), expr) {
+                                        Ok(template) => {
+                                            // Call the compiled thunk in place of eval.
+                                            let thunk = heap.closure(template, Box::new([]));
+                                            self.stack.truncate(base);
+                                            self.stack.push(thunk);
+                                        }
+                                        // An import needs a library file loaded first:
+                                        // call (%load-then-eval "file" expr env) instead.
+                                        Err(e) => match heap.libraries.pending_load.take() {
+                                            Some(path) => match system_procedure(heap, "%load-then-eval") {
+                                                Some(f) => {
+                                                    let path = heap.string(&path.to_string_lossy());
+                                                    self.stack[base] = f;
+                                                    self.stack.insert(base + 1, path);
+                                                }
+                                                None => fail!('run, e),
+                                            },
+                                            None => fail!('run, e),
+                                        },
+                                    }
+                                    continue;
+                                }
+                                _ => match self.call_primitive(heap, p, base) {
                                     Ok(result) if tail => do_return!(result),
                                     Ok(result) => {
                                         self.stack.truncate(base);
@@ -421,15 +455,15 @@ impl Vm {
     }
 
     /// Collect garbage if a collection is due. The roots are the value
-    /// stack, the closures saved in frames, the running closure, the
-    /// current ports, and the environment's binding cells (the heap adds
-    /// the symbol table).
+    /// stack, the closures saved in frames, the running closure and the
+    /// current ports (the heap adds the symbol table, the environments and
+    /// the libraries).
     #[inline]
-    fn safepoint(&self, heap: &mut Heap, env: &Env, closure: GcRef) {
+    fn safepoint(&self, heap: &mut Heap, closure: GcRef) {
         if heap.needs_gc() {
             let frames = self.frames.iter().map(|f| Value::obj(f.closure));
             let roots = self.stack.iter().chain(&self.ports).copied().chain(frames).chain([Value::obj(closure)]);
-            heap.collect(roots.chain(env.roots()));
+            heap.collect(roots);
         }
     }
 
@@ -467,7 +501,7 @@ impl Vm {
     }
 
     /// Call primitive `p`, whose arguments are above slot `base`.
-    fn call_primitive(&mut self, heap: &mut Heap, env: &mut Env, p: &Primitive, base: usize) -> Result<Value, Error> {
+    fn call_primitive(&mut self, heap: &mut Heap, p: &Primitive, base: usize) -> Result<Value, Error> {
         let n = self.stack.len() - base - 1;
         if n < p.min || p.max.is_some_and(|max| n > max) {
             return Err(format!("{}: wrong number of arguments: {}", p.name, n).into());
@@ -476,18 +510,19 @@ impl Vm {
             PrimFn::Builtin(f) => f(heap, &self.stack[base + 1..]),
             PrimFn::Vm(f) => {
                 let args = self.stack[base + 1..].to_vec();
-                f(self, heap, env, &args)
+                f(self, heap, &args)
             }
-            PrimFn::Apply | PrimFn::CallCc | PrimFn::CallEc => unreachable!("handled by the call instructions"),
+            PrimFn::Apply | PrimFn::CallCc | PrimFn::CallEc | PrimFn::Eval => unreachable!("handled by the call instructions"),
         }
     }
 }
 
-/// The procedure errors are raised through, `%raise-error`, if
-/// `scheme/core.scm` has defined it.
-fn raise_hook(heap: &mut Heap, env: &Env) -> Option<Value> {
-    let name = heap.intern("%raise-error").as_ref().unwrap();
-    match env.lookup(name)? {
+/// The procedure `name` in the system environment, if `scheme/core.scm` has
+/// defined it: `%raise-error`, which errors are raised through, and
+/// `%load-then-eval`.
+fn system_procedure(heap: &mut Heap, name: &str) -> Option<Value> {
+    let name = heap.intern(name).as_ref().unwrap();
+    match env_of(heap.system?).borrow().lookup(name)? {
         TopBinding::Variable(cell) => {
             let v = cell_value(cell).get();
             matches!(v.as_obj().map(|o| &o.kind), Some(Obj::Closure { .. })).then_some(v)

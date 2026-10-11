@@ -3,8 +3,11 @@
 //! **The syntactic environment** says what each identifier means: a local
 //! variable, a macro, a core form, or a global variable. Local scopes are a
 //! stack of frames (`frames`), each a list of (identifier, `Binding`); below
-//! them is the top-level environment (`globals::Env`), which binds the core
-//! forms, top-level macros and global variables.
+//! them is a top-level environment (`globals::Env`), which binds the core
+//! forms, top-level macros and global variables. A macro remembers the
+//! top-level environment it was defined in, and its aliases resolve there:
+//! a macro imported from the system environment means the same thing in a
+//! library that never imported what its expansion uses.
 //!
 //! **Core forms** are the cases in `core` below. Everything else that R7RS
 //! calls syntax (`cond`, `case`, `and`, `do`, …) is a `syntax-rules` macro
@@ -28,7 +31,8 @@ use std::collections::VecDeque;
 
 use crate::compile::ast::{Expr, Lambda, Var, VarId};
 use crate::compile::syntax_rules::{self, identifier, list_parts, strip, strip_datum};
-use crate::globals::{Env, TopBinding};
+use crate::globals::{Env, TopBinding, cell_value, env_of};
+use crate::libraries::{Declarations, choose_cond_expand_clause, collect_declarations, include_forms, library_name, resolve_import_set};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
 use crate::printer::print_value;
 use crate::value::Value;
@@ -52,6 +56,11 @@ pub enum Core {
     LetSyntax,
     LetrecSyntax,
     SyntaxRules,
+    Import,
+    DefineLibrary,
+    Include,
+    IncludeCi,
+    CondExpand,
 }
 
 /// The core forms' names, bound in every top-level environment.
@@ -72,18 +81,45 @@ pub const CORE_FORMS: &[(&str, Core)] = &[
     ("let-syntax", Core::LetSyntax),
     ("letrec-syntax", Core::LetrecSyntax),
     ("syntax-rules", Core::SyntaxRules),
+    ("import", Core::Import),
+    ("define-library", Core::DefineLibrary),
+    ("include", Core::Include),
+    ("include-ci", Core::IncludeCi),
+    ("cond-expand", Core::CondExpand),
 ];
 
 /// What an identifier means at a point in the code. Two identifiers are
-/// `free-identifier=?` when they resolve to equal bindings.
+/// `free-identifier=?` when they resolve to the same binding (`same`).
 #[derive(Clone, Copy, PartialEq)]
 enum Binding {
     Local(VarId),
     Macro(GcRef),
     Core(Core),
     /// A global variable, bound or not, keyed by its identifier in the
-    /// top-level environment.
-    Global(GcRef),
+    /// top-level environment `.1`.
+    Global(GcRef, GcRef),
+}
+
+/// The cell of a bound global variable, if `key` is one in `env`.
+fn bound_cell(key: GcRef, env: GcRef) -> Option<GcRef> {
+    match env_of(env).borrow().lookup(key) {
+        Some(TopBinding::Variable(cell)) if !cell_value(cell).get().is_undefined() => Some(cell),
+        _ => None,
+    }
+}
+
+/// `free-identifier=?` on resolved bindings. Two globals are the same if
+/// they are the same variable (an import shares the library's cell), or
+/// are both unbound and named alike, like `else` in `cond`.
+fn same(a: Binding, b: Binding) -> bool {
+    match (a, b) {
+        (Binding::Global(k1, e1), Binding::Global(k2, e2)) => match (bound_cell(k1, e1), bound_cell(k2, e2)) {
+            (Some(c1), Some(c2)) => c1 == c2,
+            (None, None) => strip(k1) == strip(k2),
+            _ => false,
+        },
+        _ => a == b,
+    }
 }
 
 /// The deepest nesting of macro uses allowed, to turn a macro that
@@ -92,14 +128,16 @@ enum Binding {
 /// (and `.cargo/config.toml` does the same for tests).
 const MAX_NESTED_EXPANSIONS: usize = 10_000;
 
-/// Expand a top-level form.
-pub fn expand(heap: &mut Heap, env: &mut Env, x: Value) -> Result<Expr, String> {
+/// Expand a top-level form for the environment `env`.
+pub fn expand(heap: &mut Heap, env: GcRef, x: Value) -> Result<Expr, String> {
     Expander { heap, env, frames: Vec::new(), next_id: 0, nesting: 0 }.expr(x, true)
 }
 
 struct Expander<'a> {
     heap: &'a mut Heap,
-    env: &'a mut Env,
+    /// The top-level environment being compiled for (a library's, while
+    /// `define-library` expands its body).
+    env: GcRef,
     /// The local scopes, innermost last.
     frames: Vec<Vec<(GcRef, Binding)>>,
     next_id: VarId,
@@ -126,34 +164,40 @@ fn show(id: GcRef) -> String {
 impl Expander<'_> {
     /// What `id` means here.
     fn resolve(&self, id: GcRef) -> Binding {
-        self.resolve_in(id, self.frames.len())
+        self.resolve_in(id, self.frames.len(), self.env)
     }
 
     /// What `id` means in the scope made of the first `depth` frames and
-    /// the top level. An alias bound nowhere means what its original means
-    /// in the macro's definition scope.
-    fn resolve_in(&self, mut id: GcRef, mut depth: usize) -> Binding {
+    /// the top-level environment `env`. An alias bound nowhere means what
+    /// its original means in the macro's definition scope.
+    fn resolve_in(&self, mut id: GcRef, mut depth: usize, mut env: GcRef) -> Binding {
         loop {
             for frame in self.frames[..depth].iter().rev() {
                 if let Some(&(_, b)) = frame.iter().rev().find(|(k, _)| *k == id) {
                     return b;
                 }
             }
-            match self.env.lookup(id) {
-                Some(TopBinding::Variable(_)) => return Binding::Global(id),
+            match env_of(env).borrow().lookup(id) {
+                Some(TopBinding::Variable(_)) => return Binding::Global(id, env),
                 Some(TopBinding::Macro(m)) => return Binding::Macro(m),
                 Some(TopBinding::Core(c)) => return Binding::Core(c),
                 None => {}
             }
             match &id.get().kind {
-                Obj::Alias { original, depth: d } => {
+                Obj::Alias { original, depth: d, env: e } => {
                     debug_assert!(*d as usize <= depth, "an alias used outside its macro's scope");
                     id = original.as_ref().unwrap();
                     depth = *d as usize;
+                    env = *e;
                 }
-                _ => return Binding::Global(id),
+                _ => return Binding::Global(id, env),
             }
         }
+    }
+
+    /// The current top-level environment.
+    fn top<'b>(&self) -> std::cell::RefMut<'b, Env> {
+        env_of(self.env).borrow_mut()
     }
 
     /// The core form `x` is a use of, if it is one.
@@ -181,9 +225,9 @@ impl Expander<'_> {
     /// Expand one use of the macro `m`.
     fn expand_macro(&mut self, m: GcRef, x: Value) -> Result<Value, String> {
         let Obj::Macro(rules) = &m.get().kind else { unreachable!("not a macro") };
-        let depth = rules.depth as usize;
-        let same = |literal: GcRef, input: GcRef| self.resolve_in(literal, depth) == self.resolve(input);
-        let (template, binds) = rules.match_use(x, &same)?;
+        let (depth, env) = (rules.depth as usize, rules.env);
+        let literal_matches = |literal: GcRef, input: GcRef| same(self.resolve_in(literal, depth, env), self.resolve(input));
+        let (template, binds) = rules.match_use(x, &literal_matches)?;
         rules.instantiate(self.heap, template, &binds)
     }
 
@@ -242,7 +286,7 @@ impl Expander<'_> {
     fn variable(&mut self, id: GcRef) -> Result<Expr, String> {
         match self.resolve(id) {
             Binding::Local(v) => Ok(Expr::LocalRef(v)),
-            Binding::Global(key) => Ok(Expr::GlobalRef(self.env.cell(self.heap, key))),
+            Binding::Global(key, env) => Ok(Expr::GlobalRef(env_of(env).borrow_mut().cell(self.heap, key))),
             Binding::Macro(_) | Binding::Core(_) => Err(format!("{}: syntax used as a variable", show(id))),
         }
     }
@@ -275,6 +319,13 @@ impl Expander<'_> {
             Core::LetSyntax => self.let_syntax(keyword, &items, false),
             Core::LetrecSyntax => self.let_syntax(keyword, &items, true),
             Core::SyntaxRules => Err(format!("syntax-rules: only allowed as a macro's transformer: {}", print_value(x))),
+            Core::Import | Core::DefineLibrary if !top => Err(format!("{}: only allowed at top level", keyword)),
+            Core::Import => self.import(&items),
+            Core::DefineLibrary => self.define_library(&items),
+            Core::Include | Core::IncludeCi | Core::CondExpand => {
+                let forms = self.spliced_forms(c, &items)?;
+                if forms.is_empty() { Ok(Expr::Const(Value::UNSPECIFIED)) } else { self.sequence(&forms, top) }
+            }
         }
     }
 
@@ -297,7 +348,7 @@ impl Expander<'_> {
         let (name, def) = definition(items)?;
         // The cell first: if `name` is an alias, only its own cell makes
         // recursive references inside the value find it.
-        let cell = self.env.cell(self.heap, name);
+        let cell = self.top().define_cell(self.heap, name)?;
         let value = self.definition_value(name, def)?;
         Ok(Expr::GlobalDefine(cell, Box::new(value)))
     }
@@ -308,7 +359,7 @@ impl Expander<'_> {
         let [_, name, spec] = items else { return Err(syntax_error("define-syntax", items)) };
         let Some(name) = identifier(*name) else { return Err(syntax_error("define-syntax", items)) };
         let m = self.transformer(spec, 0)?;
-        self.env.define_syntax(name, m);
+        self.top().define_syntax(name, m)?;
         Ok(Expr::Const(Value::obj(strip(name))))
     }
 
@@ -318,7 +369,7 @@ impl Expander<'_> {
         if self.head_core(*spec) != Some(Core::SyntaxRules) {
             return Err(format!("not a syntax-rules transformer: {}", print_value(*spec)));
         }
-        let rules = syntax_rules::parse(*spec, depth as u32)?;
+        let rules = syntax_rules::parse(*spec, depth as u32, self.env)?;
         Ok(self.heap.make_macro(rules))
     }
 
@@ -347,7 +398,7 @@ impl Expander<'_> {
         let value = Box::new(self.expr(*value, false)?);
         match self.resolve(name) {
             Binding::Local(id) => Ok(Expr::LocalSet(id, value)),
-            Binding::Global(key) => Ok(Expr::GlobalSet(self.env.cell(self.heap, key), value)),
+            Binding::Global(key, env) => Ok(Expr::GlobalSet(env_of(env).borrow_mut().set_cell(self.heap, key)?, value)),
             Binding::Macro(_) | Binding::Core(_) => Err(format!("set!: can't assign to syntax: {}", show(name))),
         }
     }
@@ -367,7 +418,7 @@ impl Expander<'_> {
                 if self.head_core(form) == Some(Core::Define)
                     && let Ok((name, _)) = definition(&self.items(form)?)
                 {
-                    self.env.cell(self.heap, name);
+                    self.top().define_cell(self.heap, name).ok();
                 }
             }
         }
@@ -411,6 +462,11 @@ impl Expander<'_> {
                 Some(Core::Begin) => {
                     let items = self.items(form)?;
                     items[1..].iter().rev().for_each(|&f| pending.push_front(f));
+                }
+                Some(c @ (Core::Include | Core::IncludeCi | Core::CondExpand)) => {
+                    let items = self.items(form)?;
+                    let forms = self.spliced_forms(c, &items)?;
+                    forms.iter().rev().for_each(|&f| pending.push_front(f));
                 }
                 Some(Core::Define) => {
                     let (name, def) = definition(&self.items(form)?)?;
@@ -665,9 +721,85 @@ impl Expander<'_> {
         }
     }
 
+    /// A call to the system environment's procedure `name`, whatever the
+    /// environment being compiled for binds.
     fn global_call(&mut self, name: &str, args: Vec<Expr>) -> Expr {
         let sym = self.heap.intern(name).as_ref().unwrap();
-        Expr::Call(Box::new(Expr::GlobalRef(self.env.cell(self.heap, sym))), args)
+        let env = self.heap.system.unwrap_or(self.env);
+        Expr::Call(Box::new(Expr::GlobalRef(env_of(env).borrow_mut().cell(self.heap, sym))), args)
+    }
+
+    // -----------------------------------------------------------------------
+    // Libraries (R7RS §5.2, §5.6; libraries.rs)
+    // -----------------------------------------------------------------------
+
+    /// The forms `include`, `include-ci` or `cond-expand` stand for, spliced
+    /// in where they are.
+    fn spliced_forms(&mut self, c: Core, items: &[Value]) -> Result<Vec<Value>, String> {
+        match c {
+            Core::CondExpand => choose_cond_expand_clause(self.heap, &items[1..], "cond-expand"),
+            _ => {
+                let who = if c == Core::Include { "include" } else { "include-ci" };
+                include_forms(self.heap, &items[1..], c == Core::IncludeCi, who)
+            }
+        }
+    }
+
+    /// `(import import-set ...)`: bind the imports now, so the forms after
+    /// it are compiled with them. Every set is resolved before anything is
+    /// bound, so a failing import binds nothing.
+    fn import(&mut self, items: &[Value]) -> Result<Expr, String> {
+        if !self.top().mutable {
+            return Err("import: this environment is immutable".into());
+        }
+        let mut all = Vec::new();
+        for &set in &items[1..] {
+            all.extend(resolve_import_set(self.heap, set, "import")?);
+        }
+        let mut env = self.top();
+        for (name, binding) in all {
+            env.import(name, binding);
+        }
+        Ok(Expr::Const(Value::UNSPECIFIED))
+    }
+
+    /// `(define-library name declaration ...)`. The imports go into a new
+    /// environment and the body is expanded there now; the code it becomes
+    /// runs with the form, ending with `%register-library`, which checks the
+    /// exports and registers the library.
+    fn define_library(&mut self, items: &[Value]) -> Result<Expr, String> {
+        let who = "define-library";
+        if items.len() < 2 {
+            return Err(format!("{}: expects a library name", who));
+        }
+        library_name(items[1], who)?;
+        let mut decls = Declarations::default();
+        collect_declarations(self.heap, &items[2..], &mut decls)?;
+        let lib = self.heap.environment(Env::empty(true));
+        // Importing one name with two different bindings is an error.
+        let mut seen: Vec<(GcRef, TopBinding)> = Vec::new();
+        for &set in &decls.imports {
+            for (name, binding) in resolve_import_set(self.heap, set, who)? {
+                match seen.iter().find(|&&(n, _)| n == name) {
+                    Some(&(_, old)) if old != binding => {
+                        return Err(format!("{}: {} is imported with two different bindings", who, show(name)));
+                    }
+                    _ => {
+                        seen.push((name, binding));
+                        env_of(lib).borrow_mut().import(name, binding);
+                    }
+                }
+            }
+        }
+        let saved = std::mem::replace(&mut self.env, lib);
+        let body: Result<Vec<Expr>, String> = decls.body.iter().map(|&f| self.expr(f, true)).collect();
+        self.env = saved;
+        let mut body = body?;
+        let pairs = decls.exports.iter().map(|&(internal, external)| self.heap.cons(internal, external)).collect();
+        let exports = self.heap.list(pairs);
+        let register = self.global_call("%register-library", vec![Expr::Const(items[1]), Expr::Const(exports), Expr::Const(Value::obj(lib))]);
+        body.push(register);
+        Ok(Expr::Seq(body))
     }
 }
 

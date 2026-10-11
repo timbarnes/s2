@@ -32,7 +32,9 @@ use rustc_hash::FxHashMap;
 
 use crate::builtins::{ErrorKind, Primitive};
 use crate::compile::syntax_rules::SyntaxRules;
+use crate::globals::{Env, env_of};
 use crate::io::PortKind;
+use crate::libraries::Libraries;
 use crate::sstring::SString;
 use crate::value::Value;
 use crate::vm::{Frame, Template};
@@ -78,8 +80,11 @@ pub enum Obj {
     /// renames `original` (a symbol, or another alias), and if nothing in
     /// the expansion binds it, it means what `original` meant where the
     /// macro was defined: in the first `depth` of the expander's scope
-    /// frames (0 for a top-level macro). Prints as its symbol's name.
-    Alias { original: Value, depth: u32 },
+    /// frames (0 for a top-level macro), over the top-level environment
+    /// `env`. Prints as its symbol's name.
+    Alias { original: Value, depth: u32, env: GcRef },
+    /// A top-level environment (`globals.rs`).
+    Environment(RefCell<Env>),
     /// A `syntax-rules` transformer, bound by `define-syntax`,
     /// `let-syntax` or `letrec-syntax`. Exists only at compile time.
     Macro(SyntaxRules),
@@ -141,6 +146,16 @@ pub struct Heap {
     /// of them together.
     pub collections: usize,
     pub marked: usize,
+    /// The system and interaction environments (`globals.rs`), and the
+    /// registered libraries. They live here, beside the symbol table, so
+    /// the compiler and the builtins can reach them, and they are roots.
+    pub system: Option<GcRef>,
+    pub interaction: Option<GcRef>,
+    pub libraries: Libraries,
+    /// Values Rust code holds across a run of the VM, which must survive
+    /// its collections: a top-level form waiting to be expanded again
+    /// after a library file it imports has been loaded.
+    pub pinned: Vec<Value>,
 }
 
 impl Heap {
@@ -156,6 +171,10 @@ impl Heap {
             poison: std::env::var_os("S2_GC_POISON").is_some(),
             collections: 0,
             marked: 0,
+            system: None,
+            interaction: None,
+            libraries: Libraries::default(),
+            pinned: Vec::new(),
         }
     }
 
@@ -184,13 +203,17 @@ impl Heap {
         self.stress || self.allocations > GC_THRESHOLD.max(self.live_after_gc)
     }
 
-    /// Collect: mark everything reachable from `roots` and the symbol
-    /// table, then free the rest.
+    /// Collect: mark everything reachable from `roots`, the symbol table,
+    /// the system and interaction environments and the libraries, then free
+    /// the rest.
     pub fn collect(&mut self, roots: impl IntoIterator<Item = Value>) {
         self.epoch += 1;
         let mut m = Marker { epoch: self.epoch, grey: std::mem::take(&mut self.worklist), count: 0 };
         roots.into_iter().for_each(|v| m.value(v));
         self.symbols.values().for_each(|&r| m.obj(r));
+        self.system.iter().chain(&self.interaction).for_each(|&r| m.obj(r));
+        self.libraries.trace(|r| m.obj(r));
+        self.pinned.iter().for_each(|&v| m.value(v));
         m.trace();
         self.worklist = m.grey;
         self.marked += m.count;
@@ -276,8 +299,12 @@ impl Heap {
         self.alloc(Obj::Template(t)).as_ref().unwrap()
     }
 
-    pub fn alias(&mut self, original: Value, depth: u32) -> Value {
-        self.alloc(Obj::Alias { original, depth })
+    pub fn alias(&mut self, original: Value, depth: u32, env: GcRef) -> Value {
+        self.alloc(Obj::Alias { original, depth, env })
+    }
+
+    pub fn environment(&mut self, env: Env) -> GcRef {
+        self.alloc(Obj::Environment(RefCell::new(env))).as_ref().unwrap()
     }
 
     pub fn make_macro(&mut self, rules: SyntaxRules) -> GcRef {
@@ -380,8 +407,13 @@ impl Marker {
                     self.obj(*rtype);
                     fields.iter().for_each(|f| self.value(f.get()));
                 }
-                Obj::Alias { original, .. } => self.value(*original),
+                Obj::Alias { original, env, .. } => {
+                    self.value(*original);
+                    self.obj(*env);
+                }
+                Obj::Environment(_) => env_of(r).borrow().trace(|x| self.obj(x)),
                 Obj::Macro(m) => {
+                    self.obj(m.env);
                     m.ellipsis.iter().chain(&m.literals).for_each(|&r| self.obj(r));
                     m.rules.iter().for_each(|&(p, t)| {
                         self.value(p);

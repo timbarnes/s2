@@ -3,9 +3,12 @@
 //! Usage:
 //!
 //! ```text
-//! s2 [FLAGS]            REPL on standard input
-//! s2 [FLAGS] -e TEXT    evaluate each form in TEXT, writing each result
-//! s2 [FLAGS] FILE       run a program; results are not written
+//! s2 [FLAGS]                  REPL on standard input
+//! s2 [FLAGS] -e TEXT          evaluate each form in TEXT, writing each result
+//! s2 [FLAGS] -f FILE          evaluate each form in FILE; an error is
+//!                             reported and the next form runs
+//! s2 [FLAGS] PROGRAM ARG ...  run a program: the first error ends it, with
+//!                             status 70; (command-line) is PROGRAM ARG ...
 //! ```
 //!
 //! Flags: `--expand` prints each form's core AST (after macro expansion),
@@ -21,6 +24,7 @@ mod globals;
 mod heap;
 #[allow(dead_code)]
 mod io;
+mod libraries;
 #[allow(dead_code)]
 mod printer;
 mod reader;
@@ -37,7 +41,8 @@ use std::io::{IsTerminal, Write};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use globals::Env;
+use globals::{Env, env_of};
+use heap::GcRef;
 use heap::Heap;
 use io::PortKind;
 use reader::{ParseError, parse};
@@ -47,10 +52,12 @@ use value::Value;
 /// macros, compiled into the binary and loaded into every session.
 const CORE_SCM: &str = include_str!("../scheme/core.scm");
 
-/// One top-level environment and its heap.
+/// The heap, the VM, and the environment forms are compiled for.
 struct Session {
     heap: Heap,
-    env: Env,
+    /// The interaction environment, except while `scheme/core.scm` loads
+    /// into the system environment.
+    env: GcRef,
     vm: vm::Vm,
     dis: bool,
     expand: bool,
@@ -59,30 +66,72 @@ struct Session {
 impl Session {
     fn new() -> Session {
         let mut heap = Heap::new();
-        let mut env = Env::new(&mut heap);
-        builtins::install(&mut heap, &mut env);
+        let core = Env::with_core_forms(&mut heap);
+        let system = heap.environment(core);
+        builtins::install(&mut heap, &mut env_of(system).borrow_mut());
+        heap.system = Some(system);
+        heap.interaction = Some(system);
         let vm = vm::Vm::new(&mut heap);
-        let mut s = Session { heap, env, vm, dis: false, expand: false };
+        let mut s = Session { heap, env: system, vm, dis: false, expand: false };
         let mut port = io::new_string_port_input(CORE_SCM);
         while let Ok(datum) = parse(&mut s.heap, &mut port) {
             if let Err(e) = s.eval(datum) {
                 panic!("scheme/core.scm: {}", e);
             }
         }
+        libraries::register_standard_libraries(&mut s.heap, system);
+        // The interaction environment: every system binding, imported
+        // (globals.rs).
+        let mut interaction = Env::empty(true);
+        for (name, binding) in env_of(system).borrow().bindings() {
+            interaction.import(name, binding);
+        }
+        let interaction = s.heap.environment(interaction);
+        s.heap.interaction = Some(interaction);
+        s.env = interaction;
         s
     }
 
-    /// Compile one top-level form and run it.
+    /// Compile one top-level form and run it. If it imports a library
+    /// whose file hasn't been loaded, load the file and try again.
     fn eval(&mut self, datum: Value) -> Result<Value, String> {
-        let ast = compile::expand::expand(&mut self.heap, &mut self.env, datum)?;
-        if self.expand {
-            println!("{}", compile::ast::show(&ast));
+        loop {
+            match compile::expand::expand(&mut self.heap, self.env, datum) {
+                Ok(ast) => return self.run(&ast),
+                Err(e) => match self.heap.libraries.pending_load.take() {
+                    Some(path) => {
+                        // The form waits through the load's collections.
+                        self.heap.pinned.push(datum);
+                        let loaded = self.load_library(&path);
+                        self.heap.pinned.pop();
+                        loaded?;
+                    }
+                    None => return Err(e),
+                },
+            }
         }
-        let template = compile::codegen::codegen(&mut self.heap, &ast);
+    }
+
+    fn run(&mut self, ast: &compile::ast::Expr) -> Result<Value, String> {
+        if self.expand {
+            println!("{}", compile::ast::show(ast));
+        }
+        let template = compile::codegen::codegen(&mut self.heap, ast);
         if self.dis {
             print!("{}", compile::disasm::disassemble(template));
         }
-        self.vm.run(&mut self.heap, &mut self.env, template)
+        self.vm.run(&mut self.heap, template)
+    }
+
+    /// `(%load-library "path")`, written in Scheme (scheme/core.scm).
+    fn load_library(&mut self, path: &std::path::Path) -> Result<Value, String> {
+        let f = self.heap.intern("%load-library");
+        let name = self.heap.string(&path.to_string_lossy());
+        let form = self.heap.list(vec![f, name]);
+        let saved = std::mem::replace(&mut self.env, self.heap.interaction.unwrap());
+        let result = self.eval(form);
+        self.env = saved;
+        result
     }
 
     /// Evaluate every form from `port`. Returns false if any form had an
@@ -111,24 +160,69 @@ impl Session {
                 }
                 Ok(_) => {}
                 Err(msg) => {
-                    std::io::stdout().flush().ok();
-                    eprintln!("error: {}", msg);
-                    // The procedures that were waiting, innermost first.
-                    for name in self.vm.backtrace.iter().take(10) {
-                        eprintln!("  in {}", name);
-                    }
-                    if self.vm.backtrace.len() > 10 {
-                        eprintln!("  ...");
-                    }
+                    self.report(&msg);
                     ok = false;
                 }
             }
         }
     }
+
+    /// Print an error, and the backtrace of the procedures that were
+    /// waiting, innermost first.
+    fn report(&self, msg: &str) {
+        std::io::stdout().flush().ok();
+        eprintln!("error: {}", msg);
+        for name in self.vm.backtrace.iter().take(10) {
+            eprintln!("  in {}", name);
+        }
+        if self.vm.backtrace.len() > 10 {
+            eprintln!("  ...");
+        }
+    }
+
+    /// Run a program (R7RS §5.1): `args` is the file and its arguments,
+    /// which `command-line` returns. The forms run in order in the
+    /// interaction environment; the first error ends the program with
+    /// status 70, as in s1. A first line starting `#!` is skipped, so a
+    /// program can be a script.
+    fn run_program(&mut self, args: &[String]) -> ! {
+        builtins::set_command_line(args.to_vec());
+        let text = match std::fs::read_to_string(&args[0]) {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("s2: {}: {}", args[0], e);
+                std::process::exit(EXIT_ERROR);
+            }
+        };
+        let text = match text.strip_prefix("#!") {
+            Some(rest) if !rest.starts_with("fold-case") && !rest.starts_with("no-fold-case") => {
+                rest.find('\n').map_or("", |i| &rest[i..]).to_string()
+            }
+            _ => text,
+        };
+        let mut port = io::new_string_port_input(&text);
+        loop {
+            let result = match parse(&mut self.heap, &mut port) {
+                Ok(datum) => self.eval(datum),
+                Err(ParseError::Eof) => break,
+                Err(ParseError::Syntax(msg)) => Err(msg),
+            };
+            if let Err(msg) = result {
+                self.report(&msg);
+                std::process::exit(EXIT_ERROR);
+            }
+        }
+        std::io::stdout().flush().ok();
+        std::process::exit(0)
+    }
 }
 
+/// The exit status of a program that ends with an error (as in s1, after
+/// BSD's EX_SOFTWARE).
+const EXIT_ERROR: i32 = 70;
+
 fn usage() -> ! {
-    eprintln!("usage: s2 [--expand] [--dis] [-e TEXT | FILE]");
+    eprintln!("usage: s2 [--expand] [--dis] [-e TEXT | -f FILE | PROGRAM [ARG ...]]");
     std::process::exit(2);
 }
 
@@ -165,13 +259,14 @@ fn run_main() {
             ok
         }
         [flag, text] if flag == "-e" => session.eval_port(&mut io::new_string_port_input(text), false, true),
-        [file] if !file.starts_with('-') => match std::fs::read_to_string(file) {
+        [flag, file] if flag == "-f" => match std::fs::read_to_string(file) {
             Ok(text) => session.eval_port(&mut io::new_string_port_input(&text), false, false),
             Err(e) => {
                 eprintln!("s2: {}: {}", file, e);
                 false
             }
         },
+        [file, ..] if !file.starts_with('-') => session.run_program(&args),
         _ => usage(),
     };
     std::io::stdout().flush().ok();
@@ -524,6 +619,28 @@ mod tests {
         assert_eq!(s.vm.captures, 0);
     }
 
+    /// Libraries and environments, under GC stress (as every `check` is).
+    /// tests/scheme/library_tests.scm, ported from s1, covers them in
+    /// detail.
+    #[test]
+    fn libraries_and_eval() {
+        // A library file found on the search path, loading the one it
+        // imports, while the form that imported it waits through the
+        // collections (it is pinned).
+        check("(import (tests libs uses-greet)) (greet-twice \"a\") (import (tests libs greet)) (greet \"b\")",
+              &["", "(\"hello, a\" \"hello, a\")", "", "\"hello, b\""]);
+        check("(eval '(* 7 3) (interaction-environment)) (eval '(car '(1)) (environment '(only (scheme base) car quote)))
+               (eval '(define z 1) (environment '(scheme base))) (eval 'cons (environment '(only (scheme base) car)))",
+              &["21", "1", "error: define: this environment is immutable", "error: unbound variable: cons"]);
+        // An imported variable sees the library's assignments; the importer
+        // can't assign it, and its own define shadows it.
+        check("(define-library (t c) (export n inc!) (import (scheme base)) (begin (define n 0) (define (inc!) (set! n (+ n 1)))))
+               (import (t c)) (inc!) n (set! n 5) (define n 'mine) n",
+              &["", "", "", "1", "error: set!: n is imported and can't be assigned", "n", "mine"]);
+        check("(define (f) (import (scheme base))) (cond-expand ((and r7rs (not no-such)) 'yes))",
+              &["error: import: only allowed at top level", "yes"]);
+    }
+
     #[test]
     fn deep_expansions() {
         // A 1,000-argument or nests 1,000 macro uses, and as many lets: on
@@ -552,7 +669,7 @@ mod tests {
         let mut s = Session::new();
         let mut show = |src: &str| {
             let datum = parse(&mut s.heap, &mut io::new_string_port_input(src)).unwrap();
-            compile::ast::show(&compile::expand::expand(&mut s.heap, &mut s.env, datum).unwrap())
+            compile::ast::show(&compile::expand::expand(&mut s.heap, s.env, datum).unwrap())
         };
         assert_eq!(show("(define (f x) (or x 'none))"),
                    "(define f (named-lambda (f x.1) (let ((x.2 x.1)) (if x.2 x.2 'none))))");
@@ -662,6 +779,7 @@ mod tests {
             ("let*-values", "(let*-values (((m) (- n 1))) (loop m))"),
             ("case-lambda", "((case-lambda ((x) (loop x))) (- n 1))"),
             ("apply, case-lambda", "(apply (case-lambda ((x) (loop x))) (list (- n 1)))"),
+            ("eval", "(eval (list 'loop (- n 1)) (interaction-environment))"),
             ("macro use", "(let-syntax ((tail-id (syntax-rules () ((_ e) e)))) (tail-id (loop (- n 1))))"),
         ] {
             let src = format!("(define (loop n) (if (= n 0) (%frame-depth) {})) (= (loop 5) (loop 100))", step);
