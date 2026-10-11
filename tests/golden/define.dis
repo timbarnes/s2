@@ -1,0 +1,7 @@
+template top-level
+   0  Fixnum 10
+   1  GlobalDefine k0  ; x
+   2  Return
+template top-level
+   0  GlobalRef k0     ; x
+   1  Return

@@ -1,4 +1,4 @@
-//! The s2 binary: read-print through `-e` and standard input, exit status.
+//! The s2 binary: `-e`, standard input, files, exit status.
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -20,15 +20,15 @@ fn stdout(o: &Output) -> String {
 }
 
 #[test]
-fn eval_flag_writes_each_datum() {
-    let o = s2(&["-e", "(a . (b c)) 'x #(1 2/4)"], "");
+fn eval_flag_writes_each_result() {
+    let o = s2(&["-e", "'(a . (b c)) ''x #(1 2/4) (define x 10) (if (< x 20) (+ x 1) 0) (* 6 7)"], "");
     assert!(o.status.success());
-    assert_eq!(stdout(&o), "(a b c)\n(quote x)\n#(1 1/2)\n");
+    assert_eq!(stdout(&o), "(a b c)\n(quote x)\n#(1 1/2)\nx\n11\n42\n");
 }
 
 #[test]
 fn stdin_without_a_terminal_has_no_prompt() {
-    let o = s2(&[], "#0=(1 . #0#)\n\"s\"\n");
+    let o = s2(&[], "'#0=(1 . #0#)\n\"s\"\n");
     assert!(o.status.success());
     assert_eq!(stdout(&o), "#0=(1 . #0#)\n\"s\"\n");
 }
@@ -41,6 +41,24 @@ fn syntax_error_continues_and_fails() {
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(err.contains("unknown character name"), "{}", err);
     assert!(err.contains("Unexpected ')'"), "{}", err);
+}
+
+#[test]
+fn runtime_error_continues_and_fails() {
+    let o = s2(&["-e", "1 undefined-var (display \"after\")"], "");
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(stdout(&o), "1\nafter");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("unbound variable: undefined-var"));
+}
+
+#[test]
+fn file_results_are_not_written() {
+    let path = std::env::temp_dir().join(format!("s2-cli-test-{}.scm", std::process::id()));
+    std::fs::write(&path, "(define x 6) (* x 7) (display (* x 7)) (newline)").unwrap();
+    let o = s2(&[path.to_str().unwrap()], "");
+    std::fs::remove_file(&path).ok();
+    assert!(o.status.success());
+    assert_eq!(stdout(&o), "42\n");
 }
 
 #[test]

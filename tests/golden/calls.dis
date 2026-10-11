@@ -1,0 +1,21 @@
+template top-level
+   0  GlobalRef k0     ; *
+   1  Fixnum 6
+   2  Fixnum 7
+   3  Call 2
+   4  Return
+template top-level
+   0  GlobalRef k0     ; +
+   1  GlobalRef k1     ; *
+   2  Fixnum 2
+   3  Fixnum 3
+   4  Call 2
+   5  GlobalRef k2     ; -
+   6  Fixnum 10
+   7  GlobalRef k1     ; *
+   8  Fixnum 2
+   9  Fixnum 2
+  10  Call 2
+  11  Call 2
+  12  Call 2
+  13  Return

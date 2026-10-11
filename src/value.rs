@@ -107,9 +107,10 @@ impl Value {
         }
     }
 
-    /// The heap object, if this value is one.
-    pub fn as_obj(&self) -> Option<&GcObject> {
-        match &self.0 {
+    /// The heap object, if this value is one. The lifetime is unbounded,
+    /// as for `GcRef::get`.
+    pub fn as_obj<'a>(self) -> Option<&'a GcObject> {
+        match self.0 {
             Repr::Obj(r) => Some(r.get()),
             _ => None,
         }

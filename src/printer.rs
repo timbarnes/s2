@@ -231,6 +231,12 @@ fn print_into(out: &mut String, v: Value, ctx: &mut Ctx) {
         Obj::Rational(r) => out.push_str(&format!("{}/{}", r.numer(), r.denom())),
         Obj::Str(s) if write => write_string(out, &s.borrow()),
         Obj::Str(s) => out.push_str(&s.borrow()),
+        Obj::Global { name, .. } => {
+            out.push_str("#<global ");
+            print_into(out, Value::obj(*name), ctx);
+            out.push('>');
+        }
+        Obj::Primitive(p) => out.push_str(&format!("#<procedure {}>", p.name)),
     }
 }
 

@@ -17,6 +17,7 @@ use num_rational::BigRational;
 use num_traits::{One, ToPrimitive};
 use rustc_hash::FxHashMap;
 
+use crate::builtins::Primitive;
 use crate::sstring::SString;
 use crate::value::Value;
 
@@ -42,7 +43,7 @@ pub struct GcObject {
     pub kind: Obj,
 }
 
-/// The kinds of heap object. P0 has the ones the reader produces.
+/// The kinds of heap object.
 pub enum Obj {
     Pair { car: Cell<Value>, cdr: Cell<Value> },
     /// An interned symbol. Its name never changes.
@@ -54,6 +55,11 @@ pub enum Obj {
     BigInt(BigInt),
     /// An exact non-integer, in lowest terms.
     Rational(BigRational),
+    /// A top-level binding cell (D7): a global variable. Holds
+    /// `Value::UNDEFINED` until the variable is defined.
+    Global { name: GcRef, value: Cell<Value> },
+    /// A procedure written in Rust.
+    Primitive(&'static Primitive),
 }
 
 /// Owns every heap object.
@@ -119,10 +125,30 @@ impl Heap {
         }
     }
 
+    /// A new, unbound binding cell for the symbol `name`.
+    pub fn global(&mut self, name: GcRef) -> GcRef {
+        let v = self.alloc(Obj::Global { name, value: Cell::new(Value::UNDEFINED) });
+        v.as_ref().unwrap()
+    }
+
+    pub fn primitive(&mut self, p: &'static Primitive) -> Value {
+        self.alloc(Obj::Primitive(p))
+    }
+
     /// The list of `items`.
     pub fn list(&mut self, items: Vec<Value>) -> Value {
         items.into_iter().rev().fold(Value::NIL, |tail, v| self.cons(v, tail))
     }
+}
+
+/// The elements of a proper list, or None if `v` is not one.
+pub fn list_to_vec(mut v: Value) -> Option<Vec<Value>> {
+    let mut items = Vec::new();
+    while let Some(Obj::Pair { car, cdr }) = v.as_obj().map(|o| &o.kind) {
+        items.push(car.get());
+        v = cdr.get();
+    }
+    v.is_nil().then_some(items)
 }
 
 impl Drop for Heap {

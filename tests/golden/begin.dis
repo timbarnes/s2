@@ -1,0 +1,15 @@
+template top-level
+   0  GlobalRef k0     ; display
+   1  Const k1         ; "a"
+   2  Call 1
+   3  Pop
+   4  GlobalRef k0     ; display
+   5  Const k2         ; "b"
+   6  Call 1
+   7  Pop
+   8  GlobalRef k3     ; newline
+   9  Call 0
+  10  Pop
+  11  Const k4         ; done
+  12  Return
+ab

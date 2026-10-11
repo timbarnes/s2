@@ -1,0 +1,4 @@
+template top-level
+   0  GlobalRef k0     ; undefined-variable
+   1  Return
+error: unbound variable: undefined-variable
