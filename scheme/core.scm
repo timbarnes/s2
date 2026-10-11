@@ -107,22 +107,23 @@
         ((null? (car lists)) #t)
         (else (%any-null? (cdr lists)))))
 
-(define (map f list1 . lists)
-  (if (null? lists)
+;; Zero lists are allowed (the result is empty), as in s1.
+(define (map f . lists)
+  (if (and (pair? lists) (null? (cdr lists)))
       ;; One list, the common case: walk it directly.
-      (let loop ((l list1))
+      (let loop ((l (car lists)))
         (if (pair? l) (cons (f (car l)) (loop (cdr l))) '()))
-      (let loop ((ls (cons list1 lists)))
-        (if (%any-null? ls)
+      (let loop ((ls lists))
+        (if (or (null? ls) (%any-null? ls))
             '()
             (cons (apply f (map car ls)) (loop (map cdr ls)))))))
 
-(define (for-each f list1 . lists)
-  (if (null? lists)
-      (let loop ((l list1))
+(define (for-each f . lists)
+  (if (and (pair? lists) (null? (cdr lists)))
+      (let loop ((l (car lists)))
         (when (pair? l) (f (car l)) (loop (cdr l))))
-      (let loop ((ls (cons list1 lists)))
-        (unless (%any-null? ls)
+      (let loop ((ls lists))
+        (unless (or (null? ls) (%any-null? ls))
           (apply f (map car ls))
           (loop (map cdr ls))))))
 
@@ -460,7 +461,8 @@
 (define-syntax %case-lambda
   (syntax-rules ()
     ((_ args)
-     (error "case-lambda: no clause accepts the arguments" args))
+     (error (string-append "case-lambda: no clause accepts "
+                           (number->string (length args)) " arguments")))
     ((_ args ((p ...) body ...) clause ...)
      (if (= (length args) (length '(p ...)))
          (apply (lambda (p ...) body ...) args)

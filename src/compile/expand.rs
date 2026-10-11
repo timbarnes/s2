@@ -61,6 +61,13 @@ pub enum Core {
     Include,
     IncludeCi,
     CondExpand,
+    SyntaxError,
+    /// Auxiliary syntax (R7RS §4.3.2): `else`, `=>`, `_` and `...`. They are
+    /// bound so that they can be exported, imported and renamed, and so
+    /// that a macro's literal matches them by binding: `cond` recognises
+    /// an imported `else` renamed `otherwise`, and not a local variable
+    /// named `else`. Used as an expression, they are an error.
+    Auxiliary,
 }
 
 /// The core forms' names, bound in every top-level environment.
@@ -86,6 +93,11 @@ pub const CORE_FORMS: &[(&str, Core)] = &[
     ("include", Core::Include),
     ("include-ci", Core::IncludeCi),
     ("cond-expand", Core::CondExpand),
+    ("syntax-error", Core::SyntaxError),
+    ("else", Core::Auxiliary),
+    ("=>", Core::Auxiliary),
+    ("_", Core::Auxiliary),
+    ("...", Core::Auxiliary),
 ];
 
 /// What an identifier means at a point in the code. Two identifiers are
@@ -319,6 +331,22 @@ impl Expander<'_> {
             Core::LetSyntax => self.let_syntax(keyword, &items, false),
             Core::LetrecSyntax => self.let_syntax(keyword, &items, true),
             Core::SyntaxRules => Err(format!("syntax-rules: only allowed as a macro's transformer: {}", print_value(x))),
+            Core::Auxiliary => Err(format!("{}: auxiliary syntax can't be used as an expression", keyword)),
+            // (syntax-error message irritant ...), from a macro's template
+            // (R7RS §4.3.3): an error when the macro use is expanded. The
+            // irritants are written after the message.
+            Core::SyntaxError => {
+                let mut text = match items.get(1).and_then(|&m| m.as_obj().map(|o| &o.kind)) {
+                    Some(Obj::Str(m)) => m.borrow().to_string(),
+                    _ => return Err(syntax_error("syntax-error", &items)),
+                };
+                for &irritant in &items[2..] {
+                    let irritant = strip_datum(self.heap, irritant);
+                    text.push(' ');
+                    text.push_str(&print_value(irritant));
+                }
+                Err(text)
+            }
             Core::Import | Core::DefineLibrary if !top => Err(format!("{}: only allowed at top level", keyword)),
             Core::Import => self.import(&items),
             Core::DefineLibrary => self.define_library(&items),

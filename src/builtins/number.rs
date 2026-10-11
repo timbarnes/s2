@@ -292,7 +292,14 @@ fn sub(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
         return Ok(int128(heap, if args.len() == 1 { -first } else { ns.fold(first, |a, b| a - b) }));
     }
     if args.len() == 1 {
-        return fold(heap, Num::Int(BigInt::zero()), args, Op::Sub, "-");
+        // Negation, not 0 - x, which would lose the sign of a zero:
+        // (- 0.0) is -0.0.
+        return Ok(match Num::of(args[0], "-")? {
+            Num::Int(i) => Num::Int(-i),
+            Num::Rat(r) => Num::Rat(-r),
+            Num::Float(f) => Num::Float(-f),
+        }
+        .alloc(heap));
     }
     fold(heap, Num::of(args[0], "-")?, &args[1..], Op::Sub, "-")
 }

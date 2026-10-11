@@ -80,11 +80,9 @@
 (test-equal '(#t #t) (list (and (member '(scheme base) (library-names)) #t) (and (member '(s2) (library-names)) #t))
     "library-names")
 
-;; What R7RS assigns the standard libraries that s2 doesn't define: the
-;; auxiliary syntax and syntax-error (P9), and the complex-number
-;; procedures, which aren't planned.
-(test-equal '(((scheme base) ("..." "=>" "_" "else" "syntax-error"))
-              ((scheme complex) ("angle" "imag-part" "magnitude" "make-polar" "make-rectangular" "real-part"))
+;; What R7RS assigns the standard libraries that s2 doesn't define: only
+;; the complex-number procedures, which aren't planned.
+(test-equal '(((scheme complex) ("angle" "imag-part" "magnitude" "make-polar" "make-rectangular" "real-part"))
               ((scheme r5rs) ("angle" "imag-part" "magnitude" "make-polar" "make-rectangular" "real-part")))
     (let loop ((names (library-names)) (acc '()))
       (cond ((null? names) (reverse acc))
