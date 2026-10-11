@@ -3,7 +3,7 @@
 
 use std::cell::Cell;
 
-use super::{Primitive, bytevector_arg, expected, fixnum, index_arg, kind, list_arg, prim, range_args, string_arg, vector_arg};
+use super::{Error, err, Primitive, bytevector_arg, expected, fixnum, index_arg, kind, list_arg, prim, range_args, string_arg, vector_arg};
 use crate::heap::Obj;
 use crate::value::Value;
 
@@ -101,31 +101,31 @@ pub static PRIMITIVES: &[Primitive] = &[
 ];
 
 /// Element `k` of `items`, checked.
-fn element<'a, T>(items: &'a [Cell<T>], k: Value, who: &str) -> Result<&'a Cell<T>, String> {
+fn element<'a, T>(items: &'a [Cell<T>], k: Value, who: &str) -> Result<&'a Cell<T>, Error> {
     let k = index_arg(k, who)?;
-    items.get(k).ok_or_else(|| format!("{}: index {} out of range for length {}", who, k, items.len()))
+    items.get(k).ok_or_else(|| err!("{}: index {} out of range for length {}", who, k, items.len()))
 }
 
 /// The elements of the vector `args[0]` in the range `args[1..3]`.
-fn values(args: &[Value], who: &str) -> Result<Vec<Value>, String> {
+fn values(args: &[Value], who: &str) -> Result<Vec<Value>, Error> {
     let items = vector_arg(args[0], who)?;
     let (start, end) = range_args(args, 1, items.len(), who)?;
     Ok(items[start..end].iter().map(Cell::get).collect())
 }
 
 /// The bytes of the bytevector `args[0]` in the range `args[1..3]`.
-fn bytes(args: &[Value], who: &str) -> Result<Vec<u8>, String> {
+fn bytes(args: &[Value], who: &str) -> Result<Vec<u8>, Error> {
     let b = bytevector_arg(args[0], who)?;
     let (start, end) = range_args(args, 1, b.len(), who)?;
     Ok(b[start..end].iter().map(Cell::get).collect())
 }
 
-fn byte(v: Value, who: &str) -> Result<u8, String> {
+fn byte(v: Value, who: &str) -> Result<u8, Error> {
     v.as_fixnum().and_then(|n| u8::try_from(n).ok()).ok_or_else(|| expected(who, "a byte (0 to 255)", v))
 }
 
 /// The index `at`, if `n` elements copied there fit in `len`.
-fn fits(at: Value, n: usize, len: usize, who: &str) -> Result<usize, String> {
-    index_arg(at, who).ok().filter(|at| at + n <= len).ok_or_else(|| format!("{}: the copied elements don't fit at that index", who))
+fn fits(at: Value, n: usize, len: usize, who: &str) -> Result<usize, Error> {
+    index_arg(at, who).ok().filter(|at| at + n <= len).ok_or_else(|| err!("{}: the copied elements don't fit at that index", who))
 }
 

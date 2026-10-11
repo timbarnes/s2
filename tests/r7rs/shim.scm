@@ -1,16 +1,15 @@
 ;; shim.scm: a minimal stand-in for chibi's (chibi test) library, so that the
 ;; vendored R7RS conformance suite (r7rs-tests.scm) can run on s2. Forked
-;; from s1's shim, rewritten with syntax-rules.
-;;
-;; ponytail: P6's temporary shim. s2 has no guard until P7, so a test whose
-;; expression raises aborts its top-level form (s2 prints the error and
-;; goes on to the next form). The test stays "pending" and is counted as an
-;; error when the next test starts. test-error tests therefore count as
-;; errors until P7, when this shim gets s1's guard-based version.
+;; from s1's shim, rewritten with syntax-rules (s1's uses its `macro`).
 ;;
 ;; Counting: every test bumps %r7rs-attempted before its expression is
-;; evaluated. Tests in a form that failed before reaching them are never
-;; attempted at all; run.sh reports those as "not reached".
+;; evaluated, inside a `guard`. A test whose expression raises is counted as
+;; an error (or a pass, for test-error) and the next test runs normally. If
+;; something still escapes the guard, the test never reports; it is counted
+;; as an error when the next test (or test-end) notices the pending one.
+;; Tests in a top-level form that failed before reaching them (say, a
+;; definition the form needs raised) are never attempted at all; run.sh
+;; reports those as "not reached".
 
 (define %r7rs-pass 0)
 (define %r7rs-fail 0)
@@ -66,8 +65,25 @@
 
 (define (%r7rs-check name expr expected thunk)
   (%r7rs-start expr)
-  (let ((actual (thunk)))
-    (%r7rs-report (%r7rs-equal? expected actual) name expr expected actual)))
+  (guard (e (#t (%r7rs-raised name expr e)))
+    (let ((actual (thunk)))
+      (%r7rs-report (%r7rs-equal? expected actual) name expr expected actual))))
+
+;; A test's expression raised `e`.
+(define (%r7rs-raised name expr e)
+  (set! %r7rs-pending #f)
+  (set! %r7rs-error (+ %r7rs-error 1))
+  (display "ERROR: [")
+  (display (%r7rs-section-name))
+  (display "] ")
+  (if name (begin (write name) (display " ")))
+  (write expr)
+  (display " raised ")
+  (if (error-object? e)
+      (begin (display (error-object-message e))
+             (for-each (lambda (i) (display " ") (write i)) (error-object-irritants e)))
+      (write e))
+  (newline))
 
 ;; (test [name] expected expr)
 (define-syntax test
@@ -78,8 +94,14 @@
 ;; (test-assert [name] expr): passes when expr is true.
 (define-syntax test-assert
   (syntax-rules ()
-    ((_ name expr) (%r7rs-check name 'expr #t (lambda () (if expr #t #f))))
-    ((_ expr) (%r7rs-check #f 'expr #t (lambda () (if expr #t #f))))))
+    ((_ name expr) (%r7rs-assert name 'expr (lambda () expr)))
+    ((_ expr) (%r7rs-assert #f 'expr (lambda () expr)))))
+
+(define (%r7rs-assert name expr thunk)
+  (%r7rs-start expr)
+  (guard (e (#t (%r7rs-raised name expr e)))
+    (let ((actual (thunk)))
+      (%r7rs-report (if actual #t #f) name expr #t actual))))
 
 ;; (test-values expected-expr expr): compares all returned values.
 (define-syntax test-values
@@ -89,14 +111,15 @@
                   (call-with-values (lambda () expected) list)
                   (lambda () (call-with-values (lambda () expr) list))))))
 
-;; (test-error expr): should pass when expr raises; see above.
+;; (test-error expr): passes when expr raises.
 (define-syntax test-error
   (syntax-rules ()
     ((_ expr)
      (begin
        (%r7rs-start 'expr)
-       (let ((actual expr))
-         (%r7rs-report #f #f 'expr 'an-error actual))))))
+       (guard (e (#t (%r7rs-report #t #f 'expr 'an-error e)))
+         (let ((actual expr))
+           (%r7rs-report #f #f 'expr 'an-error actual)))))))
 
 (define (test-begin . name)
   (%r7rs-settle-pending)

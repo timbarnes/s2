@@ -30,12 +30,12 @@ use num_rational::BigRational;
 use num_traits::{One, ToPrimitive};
 use rustc_hash::FxHashMap;
 
-use crate::builtins::Primitive;
+use crate::builtins::{ErrorKind, Primitive};
 use crate::compile::syntax_rules::SyntaxRules;
 use crate::io::PortKind;
 use crate::sstring::SString;
 use crate::value::Value;
-use crate::vm::Template;
+use crate::vm::{Frame, Template};
 
 /// A reference to a heap object. Compared and hashed by identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -95,6 +95,20 @@ pub enum Obj {
     RecordType { name: Value, fields: Box<[Value]> },
     /// An instance of a record type.
     Record { rtype: GcRef, fields: Box<[Cell<Value>]> },
+    /// A continuation captured by `%call/cc` (D8): copies of the value and
+    /// frame stacks. Invoking it copies them back and returns its argument
+    /// to the topmost frame.
+    Continuation { stack: Box<[Value]>, frames: Box<[Frame]> },
+    /// An escape-only continuation, from `%call/ec`: the stack heights to
+    /// cut back to and the frame to return into (None for the top level).
+    /// Valid only while that frame is still on the frame stack.
+    Escape { stack_len: usize, frames_len: usize, frame: Option<Frame> },
+    /// The result of `values` with zero or several values (one value is
+    /// never wrapped).
+    Values(Box<[Value]>),
+    /// An error object (R7RS §6.11): made by `error`, or by the VM when a
+    /// builtin or an instruction fails.
+    Error { kind: ErrorKind, message: Value, irritants: Value },
     /// A procedure written in Rust.
     Primitive(&'static Primitive),
     /// Compiled code (`vm/op.rs`). Templates are heap objects so that a
@@ -282,6 +296,23 @@ impl Heap {
         self.alloc(Obj::Record { rtype, fields: fields.into_iter().map(Cell::new).collect() })
     }
 
+    pub fn continuation(&mut self, stack: Vec<Value>, frames: Vec<Frame>) -> Value {
+        self.alloc(Obj::Continuation { stack: stack.into(), frames: frames.into() })
+    }
+
+    pub fn escape(&mut self, stack_len: usize, frames_len: usize, frame: Option<Frame>) -> Value {
+        self.alloc(Obj::Escape { stack_len, frames_len, frame })
+    }
+
+    /// `values` of `items`: the item itself if there is exactly one.
+    pub fn values(&mut self, items: Vec<Value>) -> Value {
+        if items.len() == 1 { items[0] } else { self.alloc(Obj::Values(items.into())) }
+    }
+
+    pub fn error_object(&mut self, kind: ErrorKind, message: Value, irritants: Value) -> Value {
+        self.alloc(Obj::Error { kind, message, irritants })
+    }
+
     pub fn make_box(&mut self, v: Value) -> Value {
         self.alloc(Obj::Box(Cell::new(v)))
     }
@@ -331,6 +362,16 @@ impl Marker {
                 }
                 Obj::Vector(items) => items.iter().for_each(|c| self.value(c.get())),
                 Obj::Box(value) => self.value(value.get()),
+                Obj::Continuation { stack, frames } => {
+                    stack.iter().for_each(|&v| self.value(v));
+                    frames.iter().for_each(|f| self.obj(f.closure));
+                }
+                Obj::Escape { frame, .. } => frame.iter().for_each(|f| self.obj(f.closure)),
+                Obj::Values(items) => items.iter().for_each(|&v| self.value(v)),
+                Obj::Error { message, irritants, .. } => {
+                    self.value(*message);
+                    self.value(*irritants);
+                }
                 Obj::RecordType { name, fields } => {
                     self.value(*name);
                     fields.iter().for_each(|&f| self.value(f));

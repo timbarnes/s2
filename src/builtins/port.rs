@@ -5,14 +5,16 @@
 //! a port share its position, output and open/closed state.
 //!
 //! The current input, output and error ports live in the VM (`Vm::ports`),
-//! so the procedures that default to them are VM primitives.
-//! `parameterize` on them comes with parameters, in P7, and so do
-//! `with-input-from-file` and `with-output-to-file`.
+//! so the procedures that default to them are VM primitives. The procedures
+//! that return them also speak the protocol `parameterize` uses for
+//! parameter objects (`make-parameter` in `scheme/core.scm`, as in s1), so
+//! they can be parameterized.
 
 use std::cell::RefCell;
 use std::io::Write;
 
-use super::{Primitive, bytevector_arg, char_arg, expected, fixnum, index_arg, kind, prim, range_args, string_arg, vm_prim};
+use super::{Error, ErrorKind, err, Primitive, bytevector_arg, char_arg, expected, fixnum, index_arg, kind, prim, range_args, string_arg, vm_prim};
+use crate::globals::{Env, TopBinding, cell_value};
 use crate::heap::{Heap, Obj};
 use crate::io::{PortKind, new_string_port_input};
 use crate::printer::{display_value, print_value, write_shared_value, write_simple_value};
@@ -32,9 +34,18 @@ pub fn standard_ports(heap: &mut Heap) -> [Value; 3] {
 }
 
 pub static PRIMITIVES: &[Primitive] = &[
-    vm_prim("current-input-port", 0, Some(0), |vm, _, _, _| Ok(vm.ports[INPUT])),
-    vm_prim("current-output-port", 0, Some(0), |vm, _, _, _| Ok(vm.ports[OUTPUT])),
-    vm_prim("current-error-port", 0, Some(0), |vm, _, _, _| Ok(vm.ports[ERROR])),
+    vm_prim("current-input-port", 0, Some(2), |vm, h, e, a| current_port(vm, h, e, a, INPUT, "%check-input-port")),
+    vm_prim("current-output-port", 0, Some(2), |vm, h, e, a| current_port(vm, h, e, a, OUTPUT, "%check-output-port")),
+    vm_prim("current-error-port", 0, Some(2), |vm, h, e, a| current_port(vm, h, e, a, ERROR, "%check-output-port")),
+    // The current ports' converters, which check what parameterize binds.
+    prim("%check-input-port", 1, Some(1), |_, a| match kind(a[0]) {
+        Some(Obj::Port(p)) if p.borrow().is_input() => Ok(a[0]),
+        _ => Err(expected("current-input-port", "an input port", a[0])),
+    }),
+    prim("%check-output-port", 1, Some(1), |_, a| match kind(a[0]) {
+        Some(Obj::Port(p)) if p.borrow().is_output() => Ok(a[0]),
+        _ => Err(expected("current output port", "an output port", a[0])),
+    }),
     prim("port?", 1, Some(1), |_, a| port_test(a[0], |_| true)),
     prim("input-port?", 1, Some(1), |_, a| port_test(a[0], PortKind::is_input)),
     prim("output-port?", 1, Some(1), |_, a| port_test(a[0], PortKind::is_output)),
@@ -80,7 +91,7 @@ pub static PRIMITIVES: &[Primitive] = &[
     }),
     prim("delete-file", 1, Some(1), |_, a| {
         let name = string_arg(a[0], "delete-file")?.borrow().to_string();
-        std::fs::remove_file(&name).map_err(|e| format!("delete-file: could not delete file {}: {}", name, e))?;
+        std::fs::remove_file(&name).map_err(|e| file_error(format!("delete-file: could not delete file: {}", e), a[0]))?;
         Ok(Value::UNSPECIFIED)
     }),
     vm_prim("read", 0, Some(1), |vm, h, _, a| {
@@ -94,7 +105,9 @@ pub static PRIMITIVES: &[Primitive] = &[
         match result {
             Ok(datum) => Ok(datum),
             Err(ParseError::Eof) => Ok(Value::EOF),
-            Err(ParseError::Syntax(e)) => Err(format!("read: syntax error: {}", e)),
+            Err(ParseError::Syntax(e)) => {
+                Err(Error { kind: ErrorKind::Read, message: format!("read: syntax error: {}", e), irritants: Vec::new() })
+            }
         }
     }),
     vm_prim("read-char", 0, Some(1), |vm, _, _, a| Ok(char_or_eof(get_char(current(vm, a, 0, INPUT), "read-char", false)?))),
@@ -191,10 +204,31 @@ pub static PRIMITIVES: &[Primitive] = &[
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn port<'a>(v: Value, who: &str) -> Result<&'a RefCell<PortKind>, String> {
+fn port<'a>(v: Value, who: &str) -> Result<&'a RefCell<PortKind>, Error> {
     match kind(v) {
         Some(Obj::Port(p)) => Ok(p),
         _ => Err(expected(who, "a port", v)),
+    }
+}
+
+/// `(current-output-port)` and friends. `(p %param-converter)` returns the
+/// converter (the global `checker`), and `(p %param-set port)` sets it, for
+/// `parameterize`.
+fn current_port(vm: &mut Vm, heap: &mut Heap, env: &mut Env, args: &[Value], which: usize, checker: &str) -> Result<Value, Error> {
+    match args {
+        [] => Ok(vm.ports[which]),
+        [m] if m.eq(heap.intern("%param-converter")) => {
+            let name = heap.intern(checker).as_ref().unwrap();
+            match env.lookup(name) {
+                Some(TopBinding::Variable(cell)) => Ok(cell_value(cell).get()),
+                _ => Err(err!("{} is not defined", checker)),
+            }
+        }
+        [m, port] if m.eq(heap.intern("%param-set")) => {
+            vm.ports[which] = *port;
+            Ok(Value::UNSPECIFIED)
+        }
+        _ => Err("current port: expects no arguments".into()),
     }
 }
 
@@ -203,16 +237,21 @@ fn current(vm: &Vm, args: &[Value], i: usize, which: usize) -> Value {
     args.get(i).copied().unwrap_or(vm.ports[which])
 }
 
-fn closed(who: &str) -> String {
-    format!("{}: the port is closed", who)
+/// A file error (R7RS `file-error?`), naming the file as its irritant.
+fn file_error(message: String, file: Value) -> Error {
+    Error { kind: ErrorKind::File, message, irritants: vec![file] }
 }
 
-fn port_test(v: Value, test: fn(&PortKind) -> bool) -> Result<Value, String> {
+fn closed(who: &str) -> Error {
+    err!("{}: the port is closed", who)
+}
+
+fn port_test(v: Value, test: fn(&PortKind) -> bool) -> Result<Value, Error> {
     Ok(Value::bool(matches!(kind(v), Some(Obj::Port(p)) if test(&p.borrow()))))
 }
 
 /// Write text to a textual output port.
-fn put_str(port_value: Value, text: &str, who: &str) -> Result<Value, String> {
+fn put_str(port_value: Value, text: &str, who: &str) -> Result<Value, Error> {
     match &mut *port(port_value, who)?.borrow_mut() {
         PortKind::Stdout => print!("{}", text),
         PortKind::Stderr => {
@@ -222,28 +261,28 @@ fn put_str(port_value: Value, text: &str, who: &str) -> Result<Value, String> {
         }
         PortKind::StringPortOutput { content } => content.push_str(text),
         PortKind::FileOutput { name, file, binary: false } => {
-            file.write_all(text.as_bytes()).map_err(|e| format!("{}: could not write to {}: {}", who, name, e))?
+            file.write_all(text.as_bytes()).map_err(|e| err!("{}: could not write to {}: {}", who, name, e))?
         }
         PortKind::Closed { .. } => return Err(closed(who)),
-        _ => return Err(format!("{}: not a textual output port", who)),
+        _ => return Err(err!("{}: not a textual output port", who)),
     }
     Ok(Value::UNSPECIFIED)
 }
 
-fn put_bytes(port_value: Value, bytes: &[u8], who: &str) -> Result<Value, String> {
+fn put_bytes(port_value: Value, bytes: &[u8], who: &str) -> Result<Value, Error> {
     match &mut *port(port_value, who)?.borrow_mut() {
         PortKind::BytevectorOutput { bytes: out } => out.extend_from_slice(bytes),
         PortKind::FileOutput { name, file, binary: true } => {
-            file.write_all(bytes).map_err(|e| format!("{}: could not write to {}: {}", who, name, e))?
+            file.write_all(bytes).map_err(|e| err!("{}: could not write to {}: {}", who, name, e))?
         }
         PortKind::Closed { .. } => return Err(closed(who)),
-        _ => return Err(format!("{}: not a binary output port", who)),
+        _ => return Err(err!("{}: not a binary output port", who)),
     }
     Ok(Value::UNSPECIFIED)
 }
 
 /// The next character of a textual input port, consumed or not.
-fn get_char(port_value: Value, who: &str, peek: bool) -> Result<Option<char>, String> {
+fn get_char(port_value: Value, who: &str, peek: bool) -> Result<Option<char>, Error> {
     let mut k = port(port_value, who)?.borrow_mut();
     match &*k {
         PortKind::Stdin | PortKind::StringPortInput { .. } => {
@@ -254,7 +293,7 @@ fn get_char(port_value: Value, who: &str, peek: bool) -> Result<Option<char>, St
             Ok(c)
         }
         PortKind::Closed { .. } => Err(closed(who)),
-        _ => Err(format!("{}: not a textual input port", who)),
+        _ => Err(err!("{}: not a textual input port", who)),
     }
 }
 
@@ -264,7 +303,7 @@ fn char_or_eof(c: Option<char>) -> Value {
 
 /// A line, without its terminator (`\n`, `\r` or `\r\n`); the eof object at
 /// the end of input.
-fn read_line(vm: &mut Vm, heap: &mut Heap, _: &mut crate::globals::Env, args: &[Value]) -> Result<Value, String> {
+fn read_line(vm: &mut Vm, heap: &mut Heap, _: &mut Env, args: &[Value]) -> Result<Value, Error> {
     let p = current(vm, args, 0, INPUT);
     let mut line = String::new();
     let mut any = false;
@@ -292,15 +331,15 @@ fn read_line(vm: &mut Vm, heap: &mut Heap, _: &mut crate::globals::Env, args: &[
 }
 
 /// Run `f` on a binary input port's bytes and position.
-fn with_binary_input<T>(port_value: Value, who: &str, f: impl FnOnce(&[u8], &mut usize) -> T) -> Result<T, String> {
+fn with_binary_input<T>(port_value: Value, who: &str, f: impl FnOnce(&[u8], &mut usize) -> T) -> Result<T, Error> {
     match &mut *port(port_value, who)?.borrow_mut() {
         PortKind::BytevectorInput { bytes, pos } => Ok(f(bytes, pos)),
         PortKind::Closed { .. } => Err(closed(who)),
-        _ => Err(format!("{}: not a binary input port", who)),
+        _ => Err(err!("{}: not a binary input port", who)),
     }
 }
 
-fn binary_read(port_value: Value, who: &str, consume: bool) -> Result<Value, String> {
+fn binary_read(port_value: Value, who: &str, consume: bool) -> Result<Value, Error> {
     let b = with_binary_input(port_value, who, |bytes, pos| {
         let b = bytes.get(*pos).copied();
         if consume && b.is_some() {
@@ -311,10 +350,11 @@ fn binary_read(port_value: Value, who: &str, consume: bool) -> Result<Value, Str
     Ok(b.map_or(Value::EOF, |b| fixnum(b as usize)))
 }
 
-fn open_input(heap: &mut Heap, name: Value, binary: bool) -> Result<Value, String> {
+fn open_input(heap: &mut Heap, name: Value, binary: bool) -> Result<Value, Error> {
     let who = if binary { "open-binary-input-file" } else { "open-input-file" };
+    let file_name = name;
     let name = string_arg(name, who)?.borrow().to_string();
-    let err = |e: std::io::Error| format!("{}: could not open file {}: {}", who, name, e);
+    let err = |e: std::io::Error| file_error(format!("{}: could not open file: {}", who, e), file_name);
     let kind = if binary {
         PortKind::BytevectorInput { bytes: std::fs::read(&name).map_err(err)?, pos: 0 }
     } else {
@@ -323,16 +363,17 @@ fn open_input(heap: &mut Heap, name: Value, binary: bool) -> Result<Value, Strin
     Ok(heap.port(kind))
 }
 
-fn open_output(heap: &mut Heap, name: Value, binary: bool) -> Result<Value, String> {
+fn open_output(heap: &mut Heap, name: Value, binary: bool) -> Result<Value, Error> {
     let who = if binary { "open-binary-output-file" } else { "open-output-file" };
+    let file_name = name;
     let name = string_arg(name, who)?.borrow().to_string();
-    let file = std::fs::File::create(&name).map_err(|e| format!("{}: could not open file {}: {}", who, name, e))?;
+    let file = std::fs::File::create(&name).map_err(|e| file_error(format!("{}: could not open file: {}", who, e), file_name))?;
     Ok(heap.port(PortKind::FileOutput { name, file, binary }))
 }
 
 /// Close a port (closing an output file), after checking it is the right
 /// kind.
-fn close(port_value: Value, who: &str, right_kind: fn(&PortKind) -> bool) -> Result<Value, String> {
+fn close(port_value: Value, who: &str, right_kind: fn(&PortKind) -> bool) -> Result<Value, Error> {
     let mut k = port(port_value, who)?.borrow_mut();
     if !right_kind(&k) {
         return Err(expected(who, if who == "close-input-port" { "an input port" } else { "an output port" }, port_value));

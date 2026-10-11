@@ -358,6 +358,19 @@ impl Expander<'_> {
             // unspecified.
             return Ok(Expr::Const(Value::UNSPECIFIED));
         }
+        if top {
+            // Make the cells of the begin's definitions first, so a form can
+            // refer to one defined later in the same begin. Only a hidden
+            // definition (keyed by a macro's alias) needs this: until its
+            // cell exists, the alias would resolve to the plain global.
+            for &form in &items[1..] {
+                if self.head_core(form) == Some(Core::Define)
+                    && let Ok((name, _)) = definition(&self.items(form)?)
+                {
+                    self.env.cell(self.heap, name);
+                }
+            }
+        }
         self.sequence(&items[1..], top).map_err(|e| if items.len() == 1 { "begin: empty in an expression".into() } else { e })
     }
 

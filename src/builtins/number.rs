@@ -10,8 +10,6 @@
 //! fast path for fixnum arguments that allocates nothing. Everything else
 //! goes through `Num`, s1's working representation.
 //!
-//! Not here yet: `floor/`, `truncate/` and `exact-integer-sqrt` return
-//! multiple values, which come in P7.
 
 use std::cmp::Ordering;
 
@@ -20,7 +18,7 @@ use num_integer::Integer;
 use num_rational::BigRational;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 
-use super::{Primitive, kind, prim};
+use super::{Error, Primitive, err, expected, kind, prim};
 use crate::heap::{Heap, Obj};
 use crate::printer::{format_float, print_value};
 use crate::reader::number_syntax::{Number, NumberSyntax, parse_number};
@@ -62,6 +60,18 @@ pub static PRIMITIVES: &[Primitive] = &[
     prim("truncate-remainder", 2, Some(2), |h, a| int_div(h, a, "truncate-remainder", |x, y| x % y, |x, y| x.checked_rem(y))),
     prim("floor-quotient", 2, Some(2), |h, a| int_div(h, a, "floor-quotient", |x, y| Integer::div_floor(&x, &y), |x, y| (y != 0).then(|| Integer::div_floor(&x, &y)))),
     prim("floor-remainder", 2, Some(2), |h, a| int_div(h, a, "floor-remainder", |x, y| Integer::mod_floor(&x, &y), |x, y| (y != 0).then(|| Integer::mod_floor(&x, &y)))),
+    prim("floor/", 2, Some(2), |h, a| int_div2(h, a, "floor/", |x, y| x.div_mod_floor(&y))),
+    prim("truncate/", 2, Some(2), |h, a| int_div2(h, a, "truncate/", |x, y| x.div_rem(&y))),
+    prim("exact-integer-sqrt", 1, Some(1), |h, a| {
+        let k = match Num::of(a[0], "exact-integer-sqrt")? {
+            Num::Int(k) if !k.is_negative() => k,
+            _ => return Err(expected("exact-integer-sqrt", "a non-negative exact integer", a[0])),
+        };
+        let s = k.sqrt();
+        let r = &k - &s * &s;
+        let vals = vec![h.integer(s), h.integer(r)];
+        Ok(h.values(vals))
+    }),
     prim("gcd", 0, None, |h, a| gcd_lcm(h, a, "gcd", false)),
     prim("lcm", 0, None, |h, a| gcd_lcm(h, a, "lcm", true)),
     prim("numerator", 1, Some(1), |h, a| ratio_part(h, a[0], "numerator", true)),
@@ -117,7 +127,7 @@ fn is_integer(v: Value) -> bool {
 
 impl Num {
     /// The number `v` holds, or an error naming `who`.
-    fn of(v: Value, who: &str) -> Result<Num, String> {
+    fn of(v: Value, who: &str) -> Result<Num, Error> {
         if let Some(n) = v.as_fixnum() {
             return Ok(Num::Int(BigInt::from(n)));
         }
@@ -127,7 +137,7 @@ impl Num {
         match kind(v) {
             Some(Obj::BigInt(i)) => Ok(Num::Int(i.clone())),
             Some(Obj::Rational(r)) => Ok(Num::Rat(r.clone())),
-            _ => Err(format!("{}: expected a number, got {}", who, print_value(v))),
+            _ => Err(err!("{}: expected a number, got {}", who, print_value(v))),
         }
     }
 
@@ -165,7 +175,7 @@ impl Num {
         }
     }
 
-    fn into_exact(self, who: &str) -> Result<Num, String> {
+    fn into_exact(self, who: &str) -> Result<Num, Error> {
         match self {
             Num::Float(f) => float_to_exact(f, who),
             n => Ok(n),
@@ -196,16 +206,16 @@ fn int_to_f64(i: &BigInt) -> f64 {
 }
 
 /// The exact value of a flonum (`(exact 0.5)` is `1/2`).
-fn float_to_exact(f: f64, who: &str) -> Result<Num, String> {
-    BigRational::from_float(f).map(Num::from_ratio).ok_or_else(|| format!("{}: {} has no exact representation", who, format_float(f)))
+fn float_to_exact(f: f64, who: &str) -> Result<Num, Error> {
+    BigRational::from_float(f).map(Num::from_ratio).ok_or_else(|| err!("{}: {} has no exact representation", who, format_float(f)))
 }
 
 /// The integer `v`, exact or inexact.
-fn integer(v: Value, who: &str) -> Result<BigInt, String> {
+fn integer(v: Value, who: &str) -> Result<BigInt, Error> {
     if let Some(n) = v.as_fixnum() {
         return Ok(BigInt::from(n));
     }
-    Num::of(v, who)?.as_integer().ok_or_else(|| format!("{}: expected an integer, got {}", who, print_value(v)))
+    Num::of(v, who)?.as_integer().ok_or_else(|| err!("{}: expected an integer, got {}", who, print_value(v)))
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +257,7 @@ fn combine(acc: Num, x: Num, op: Op) -> Num {
 }
 
 /// The fold of `op` over `args` from `init`, for any numbers.
-fn fold(heap: &mut Heap, init: Num, args: &[Value], op: Op, who: &str) -> Result<Value, String> {
+fn fold(heap: &mut Heap, init: Num, args: &[Value], op: Op, who: &str) -> Result<Value, Error> {
     let mut acc = init;
     for &a in args {
         acc = combine(acc, Num::of(a, who)?, op);
@@ -269,14 +279,14 @@ fn int128(heap: &mut Heap, n: i128) -> Value {
 
 // Sums of 61-bit fixnums can't overflow an i128 for any realistic number of
 // arguments.
-fn add(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn add(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     if let Some(ns) = all_fixnums(args) {
         return Ok(int128(heap, ns.sum()));
     }
     fold(heap, Num::Int(BigInt::zero()), args, Op::Add, "+")
 }
 
-fn sub(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn sub(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     if let Some(mut ns) = all_fixnums(args) {
         let first = ns.next().unwrap();
         return Ok(int128(heap, if args.len() == 1 { -first } else { ns.fold(first, |a, b| a - b) }));
@@ -287,7 +297,7 @@ fn sub(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     fold(heap, Num::of(args[0], "-")?, &args[1..], Op::Sub, "-")
 }
 
-fn mul(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn mul(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     if let Some(mut ns) = all_fixnums(args)
         && let Some(p) = ns.try_fold(1i128, |a, b| a.checked_mul(b))
     {
@@ -298,7 +308,7 @@ fn mul(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
 
 /// `a / b`. Exact division by exact zero is an error; inexact division
 /// follows IEEE (`(/ 1.0 0)` is `+inf.0`).
-fn divide(a: Num, b: Num) -> Result<Num, String> {
+fn divide(a: Num, b: Num) -> Result<Num, Error> {
     if a.is_exact() && b.is_exact() {
         if b.sign() == Some(Ordering::Equal) {
             return Err("/: division by zero".into());
@@ -309,7 +319,7 @@ fn divide(a: Num, b: Num) -> Result<Num, String> {
     }
 }
 
-fn div(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn div(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let first = Num::of(args[0], "/")?;
     let mut acc = if args.len() == 1 { divide(Num::Int(BigInt::one()), first)? } else { first };
     for &a in &args[1..] {
@@ -318,7 +328,7 @@ fn div(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     Ok(acc.alloc(heap))
 }
 
-fn abs(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn abs(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     Ok(match Num::of(args[0], "abs")? {
         Num::Int(i) => Num::Int(i.abs()),
         Num::Rat(r) => Num::Rat(r.abs()),
@@ -357,7 +367,7 @@ fn exact_vs_float(exact: &Num, f: f64) -> Option<Ordering> {
     Some(exact.to_ratio().cmp(&BigRational::from_float(f)?))
 }
 
-fn compare(args: &[Value], who: &str, ok: fn(Ordering) -> bool) -> Result<Value, String> {
+fn compare(args: &[Value], who: &str, ok: fn(Ordering) -> bool) -> Result<Value, Error> {
     if args.iter().all(|a| a.as_fixnum().is_some()) {
         return Ok(Value::bool(args.windows(2).all(|w| ok(w[0].as_fixnum().cmp(&w[1].as_fixnum())))));
     }
@@ -367,7 +377,7 @@ fn compare(args: &[Value], who: &str, ok: fn(Ordering) -> bool) -> Result<Value,
 }
 
 /// `max` / `min`: the extreme argument, made inexact if any argument is.
-fn extreme(heap: &mut Heap, args: &[Value], who: &str, want: Ordering) -> Result<Value, String> {
+fn extreme(heap: &mut Heap, args: &[Value], who: &str, want: Ordering) -> Result<Value, Error> {
     let ns = args.iter().map(|&a| Num::of(a, who)).collect::<Result<Vec<_>, _>>()?;
     let inexact = ns.iter().any(|n| !n.is_exact());
     if let Some(nan) = ns.iter().find(|n| matches!(n, Num::Float(f) if f.is_nan())) {
@@ -383,7 +393,7 @@ fn extreme(heap: &mut Heap, args: &[Value], who: &str, want: Ordering) -> Result
     Ok(best.alloc(heap))
 }
 
-fn float_pred(v: Value, who: &str, test: fn(f64) -> bool, exact: bool) -> Result<Value, String> {
+fn float_pred(v: Value, who: &str, test: fn(f64) -> bool, exact: bool) -> Result<Value, Error> {
     Ok(Value::bool(match Num::of(v, who)? {
         Num::Float(f) => test(f),
         _ => exact,
@@ -397,37 +407,51 @@ fn float_pred(v: Value, who: &str, test: fn(f64) -> bool, exact: bool) -> Result
 /// An integer division: `fast` on two fixnums (None for division by zero),
 /// `big` on any two integers. An inexact (integral flonum) operand gives an
 /// inexact result.
-fn int_div(heap: &mut Heap, args: &[Value], who: &str, big: fn(BigInt, BigInt) -> BigInt, fast: fn(i64, i64) -> Option<i64>) -> Result<Value, String> {
+fn int_div(heap: &mut Heap, args: &[Value], who: &str, big: fn(BigInt, BigInt) -> BigInt, fast: fn(i64, i64) -> Option<i64>) -> Result<Value, Error> {
     if let (Some(x), Some(y)) = (args[0].as_fixnum(), args[1].as_fixnum()) {
         // The only fixnum quotient that isn't a fixnum is FIXNUM_MIN / -1,
         // which `Value::fixnum` turns away; it then takes the slow path.
         match fast(x, y).map(Value::fixnum) {
             Some(Some(v)) => return Ok(v),
-            None => return Err(format!("{}: division by zero", who)),
+            None => return Err(err!("{}: division by zero", who)),
             Some(None) => {}
         }
     }
     let (a, b) = (Num::of(args[0], who)?, Num::of(args[1], who)?);
     let inexact = !a.is_exact() || !b.is_exact();
-    let to_int = |n: &Num| n.as_integer().ok_or_else(|| format!("{}: expected integers", who));
+    let to_int = |n: &Num| n.as_integer().ok_or_else(|| err!("{}: expected integers", who));
     let (x, y) = (to_int(&a)?, to_int(&b)?);
     if y.is_zero() {
-        return Err(format!("{}: division by zero", who));
+        return Err(err!("{}: division by zero", who));
     }
     Ok(int_result(heap, big(x, y), inexact))
+}
+
+/// `floor/` and `truncate/`: the quotient and remainder, as two values.
+fn int_div2(heap: &mut Heap, args: &[Value], who: &str, f: fn(BigInt, BigInt) -> (BigInt, BigInt)) -> Result<Value, Error> {
+    let (a, b) = (Num::of(args[0], who)?, Num::of(args[1], who)?);
+    let inexact = !a.is_exact() || !b.is_exact();
+    let to_int = |n: &Num| n.as_integer().ok_or_else(|| err!("{}: expected integers", who));
+    let (x, y) = (to_int(&a)?, to_int(&b)?);
+    if y.is_zero() {
+        return Err(err!("{}: division by zero", who));
+    }
+    let (q, r) = f(x, y);
+    let vals = vec![int_result(heap, q, inexact), int_result(heap, r, inexact)];
+    Ok(heap.values(vals))
 }
 
 fn int_result(heap: &mut Heap, n: BigInt, inexact: bool) -> Value {
     if inexact { Value::flonum(int_to_f64(&n)) } else { heap.integer(n) }
 }
 
-fn gcd_lcm(heap: &mut Heap, args: &[Value], who: &str, lcm: bool) -> Result<Value, String> {
+fn gcd_lcm(heap: &mut Heap, args: &[Value], who: &str, lcm: bool) -> Result<Value, Error> {
     let mut acc = if lcm { BigInt::one() } else { BigInt::zero() };
     let mut inexact = false;
     for &a in args {
         let n = Num::of(a, who)?;
         inexact |= !n.is_exact();
-        let i = n.as_integer().ok_or_else(|| format!("{}: expected integers", who))?;
+        let i = n.as_integer().ok_or_else(|| err!("{}: expected integers", who))?;
         acc = if lcm { acc.lcm(&i) } else { acc.gcd(&i) };
     }
     Ok(int_result(heap, acc.abs(), inexact))
@@ -439,7 +463,7 @@ fn gcd_lcm(heap: &mut Heap, args: &[Value], who: &str, lcm: bool) -> Result<Valu
 
 /// `numerator` / `denominator`. For a flonum these are of its exact value,
 /// returned inexact: `(denominator 0.5)` is `2.0`.
-fn ratio_part(heap: &mut Heap, v: Value, who: &str, numer: bool) -> Result<Value, String> {
+fn ratio_part(heap: &mut Heap, v: Value, who: &str, numer: bool) -> Result<Value, Error> {
     let n = Num::of(v, who)?;
     let inexact = !n.is_exact();
     let r = n.into_exact(who)?.to_ratio();
@@ -463,7 +487,7 @@ fn round_half_even(r: &BigRational) -> BigInt {
 
 /// `floor`, `ceiling`, `truncate` and `round`: integers are returned as
 /// they are, rationals become exact integers, flonums stay flonums.
-fn rounding(heap: &mut Heap, v: Value, who: &str, exact: fn(&BigRational) -> BigInt, inexact: fn(f64) -> f64) -> Result<Value, String> {
+fn rounding(heap: &mut Heap, v: Value, who: &str, exact: fn(&BigRational) -> BigInt, inexact: fn(f64) -> f64) -> Result<Value, Error> {
     Ok(match Num::of(v, who)? {
         Num::Int(_) => v,
         Num::Rat(r) => heap.integer(exact(&r)),
@@ -498,7 +522,7 @@ fn simplest_positive(lo: &BigRational, hi: &BigRational) -> BigRational {
     fl + inner.recip()
 }
 
-fn rationalize(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn rationalize(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let x = Num::of(args[0], "rationalize")?;
     let y = Num::of(args[1], "rationalize")?;
     let inexact = !x.is_exact() || !y.is_exact();
@@ -523,11 +547,11 @@ fn rationalize(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
 // Transcendental functions, roots and powers
 // ---------------------------------------------------------------------------
 
-fn float_fn(v: Value, who: &str, f: fn(f64) -> f64) -> Result<Value, String> {
+fn float_fn(v: Value, who: &str, f: fn(f64) -> f64) -> Result<Value, Error> {
     Ok(Value::flonum(f(Num::of(v, who)?.to_f64())))
 }
 
-fn log(_: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn log(_: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let z = Num::of(args[0], "log")?.to_f64();
     Ok(Value::flonum(match args.get(1) {
         Some(&base) => z.ln() / Num::of(base, "log")?.to_f64().ln(),
@@ -535,7 +559,7 @@ fn log(_: &mut Heap, args: &[Value]) -> Result<Value, String> {
     }))
 }
 
-fn atan(_: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn atan(_: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let y = Num::of(args[0], "atan")?.to_f64();
     Ok(Value::flonum(match args.get(1) {
         Some(&x) => y.atan2(Num::of(x, "atan")?.to_f64()),
@@ -549,7 +573,7 @@ fn exact_root(n: &BigInt) -> Option<BigInt> {
     (&s * &s == *n).then_some(s)
 }
 
-fn sqrt(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn sqrt(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let n = Num::of(args[0], "sqrt")?;
     if n.sign() == Some(Ordering::Less) {
         return Err("sqrt: complex results are not supported".into());
@@ -569,7 +593,7 @@ fn sqrt(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
 /// try to build an astronomically large integer.
 const MAX_EXACT_POWER: u32 = 1 << 24;
 
-fn expt(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn expt(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let base = Num::of(args[0], "expt")?;
     let exp = Num::of(args[1], "expt")?;
     if let Num::Int(e) = &exp {
@@ -588,7 +612,7 @@ fn expt(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     Ok(Value::flonum(result))
 }
 
-fn exact_power(base: Num, e: &BigInt) -> Result<Num, String> {
+fn exact_power(base: Num, e: &BigInt) -> Result<Num, Error> {
     let r = base.to_ratio();
     // 0, 1 and -1 stay small whatever the exponent.
     if r.is_zero() {
@@ -607,14 +631,14 @@ fn exact_power(base: Num, e: &BigInt) -> Result<Num, String> {
     Ok(Num::from_ratio(if e.is_negative() { p.recip() } else { p }))
 }
 
-fn exact(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn exact(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     match Num::of(args[0], "exact")? {
         Num::Float(f) => Ok(float_to_exact(f, "exact")?.alloc(heap)),
         _ => Ok(args[0]),
     }
 }
 
-fn inexact(_: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn inexact(_: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     Ok(Value::flonum(Num::of(args[0], "inexact")?.to_f64()))
 }
 
@@ -622,17 +646,17 @@ fn inexact(_: &mut Heap, args: &[Value]) -> Result<Value, String> {
 // Conversion to and from strings
 // ---------------------------------------------------------------------------
 
-fn radix_arg(args: &[Value], who: &str) -> Result<u32, String> {
+fn radix_arg(args: &[Value], who: &str) -> Result<u32, Error> {
     match args.get(1) {
         None => Ok(10),
         Some(r) => match r.as_fixnum() {
             Some(r @ (2 | 8 | 10 | 16)) => Ok(r as u32),
-            _ => Err(format!("{}: radix must be 2, 8, 10 or 16", who)),
+            _ => Err(err!("{}: radix must be 2, 8, 10 or 16", who)),
         },
     }
 }
 
-fn number_to_string(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn number_to_string(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let radix = radix_arg(args, "number->string")?;
     let s = match Num::of(args[0], "number->string")? {
         Num::Int(i) => i.to_str_radix(radix),
@@ -643,7 +667,7 @@ fn number_to_string(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     Ok(heap.string(&s))
 }
 
-fn string_to_number(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn string_to_number(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let radix = radix_arg(args, "string->number")?;
     let text = super::string_arg(args[0], "string->number")?.borrow().to_string();
     Ok(match parse_number(&text, radix) {

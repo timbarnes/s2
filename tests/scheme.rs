@@ -1,5 +1,7 @@
 //! s1's Scheme test files, ported (plan/05): each `tests/scheme/*_tests.scm`
 //! runs after `harness.scm` and must report no failures and no errors.
+//! Under `S2_GC_STRESS`, long loops and deep recursions are cut to 200
+//! (`test-size`), since every call collects.
 
 use std::path::Path;
 use std::process::Command;
@@ -7,7 +9,10 @@ use std::process::Command;
 #[test]
 fn scheme_test_files_pass() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scheme");
-    let harness = std::fs::read_to_string(dir.join("harness.scm")).unwrap();
+    let mut harness = std::fs::read_to_string(dir.join("harness.scm")).unwrap();
+    if std::env::var_os("S2_GC_STRESS").is_some() {
+        harness.push_str("(define (test-size n) (min n 200))\n");
+    }
     let mut paths: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
     paths.sort();
     let mut failures = Vec::new();

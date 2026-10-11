@@ -5,7 +5,7 @@
 use std::cmp::Ordering;
 
 use super::char::fold_string;
-use super::{Primitive, char_arg, fixnum, index_arg, kind, list_arg, prim, range_args, string_arg, vector_arg};
+use super::{Error, Primitive, char_arg, fixnum, index_arg, kind, list_arg, prim, range_args, string_arg, vector_arg};
 use crate::heap::{Heap, Obj};
 use crate::value::Value;
 
@@ -95,7 +95,7 @@ pub static PRIMITIVES: &[Primitive] = &[
 ];
 
 /// `(name string [start [end]])` as a new string.
-fn copy_range(heap: &mut Heap, args: &[Value], who: &str) -> Result<Value, String> {
+fn copy_range(heap: &mut Heap, args: &[Value], who: &str) -> Result<Value, Error> {
     let s = string_arg(args[0], who)?.borrow();
     let (start, end) = range_args(args, 1, s.char_len(), who)?;
     let copy = s.substring(start, end).expect("range checked above").to_string();
@@ -104,22 +104,22 @@ fn copy_range(heap: &mut Heap, args: &[Value], who: &str) -> Result<Value, Strin
 }
 
 /// The characters of `args[0]`, a string, in the range `args[1..3]`.
-fn char_range(args: &[Value], who: &str) -> Result<Vec<char>, String> {
+fn char_range(args: &[Value], who: &str) -> Result<Vec<char>, Error> {
     let chars: Vec<char> = string_arg(args[0], who)?.borrow().chars().collect();
     let (start, end) = range_args(args, 1, chars.len(), who)?;
     Ok(chars[start..end].to_vec())
 }
 
-fn map_string(heap: &mut Heap, v: Value, who: &str, f: fn(&str) -> String) -> Result<Value, String> {
+fn map_string(heap: &mut Heap, v: Value, who: &str, f: fn(&str) -> String) -> Result<Value, Error> {
     let out = f(string_arg(v, who)?.borrow().as_str());
     Ok(heap.string(&out))
 }
 
-fn compare(args: &[Value], who: &str, fold: bool, ok: fn(Ordering) -> bool) -> Result<Value, String> {
+fn compare(args: &[Value], who: &str, fold: bool, ok: fn(Ordering) -> bool) -> Result<Value, Error> {
     let strs = args
         .iter()
         .map(|&a| string_arg(a, who).map(|s| if fold { fold_string(&s.borrow()) } else { s.borrow().to_string() }))
-        .collect::<Result<Vec<String>, String>>()?;
+        .collect::<Result<Vec<String>, Error>>()?;
     Ok(Value::bool(strs.windows(2).all(|w| ok(w[0].cmp(&w[1])))))
 }
 

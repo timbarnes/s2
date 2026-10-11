@@ -4,7 +4,7 @@
 //! ponytail: accessors find their field by name on every call, as in s1.
 //! P10 can compute the index once, when the accessor is defined.
 
-use super::{Primitive, expected, kind, list_arg, prim};
+use super::{Error, err, Primitive, expected, kind, list_arg, prim};
 use crate::heap::{GcRef, Heap, Obj};
 use crate::printer::print_value;
 use crate::value::Value;
@@ -27,32 +27,32 @@ pub static PRIMITIVES: &[Primitive] = &[
 ];
 
 /// The name and field names of a record type.
-fn record_type<'a>(v: Value, who: &str) -> Result<(Value, &'a [Value]), String> {
+fn record_type<'a>(v: Value, who: &str) -> Result<(Value, &'a [Value]), Error> {
     match kind(v) {
         Some(Obj::RecordType { name, fields }) => Ok((*name, fields)),
         _ => Err(expected(who, "a record type", v)),
     }
 }
 
-fn field_index(rtype: Value, field: Value, who: &str) -> Result<usize, String> {
+fn field_index(rtype: Value, field: Value, who: &str) -> Result<usize, Error> {
     let (name, fields) = record_type(rtype, who)?;
     fields
         .iter()
         .position(|f| f.eq(field))
-        .ok_or_else(|| format!("{}: {} has no field {}", who, print_value(name), print_value(field)))
+        .ok_or_else(|| err!("{}: {} has no field {}", who, print_value(name), print_value(field)))
 }
 
 /// The fields of `obj`, which must be a record of type `rtype`.
-fn record_fields<'a>(obj: Value, rtype: Value, who: &str) -> Result<&'a [std::cell::Cell<Value>], String> {
+fn record_fields<'a>(obj: Value, rtype: Value, who: &str) -> Result<&'a [std::cell::Cell<Value>], Error> {
     match kind(obj) {
         Some(Obj::Record { rtype: t, fields }) if Value::obj(*t).eq(rtype) => Ok(fields),
-        _ => Err(format!("{}: expected a {} record, got {}", who, print_value(record_type(rtype, who)?.0), print_value(obj))),
+        _ => Err(err!("{}: expected a {} record, got {}", who, print_value(record_type(rtype, who)?.0), print_value(obj))),
     }
 }
 
 /// `(%make-record-type name field-specs)`: each spec is `(field ...)` or a
 /// field name.
-fn make_record_type(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn make_record_type(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let mut fields: Vec<Value> = Vec::new();
     for spec in list_arg(args[1], "%make-record-type")? {
         let name = match kind(spec) {
@@ -60,10 +60,10 @@ fn make_record_type(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
             _ => spec,
         };
         if !matches!(kind(name), Some(Obj::Symbol(_))) {
-            return Err(format!("define-record-type: bad field spec {}", print_value(spec)));
+            return Err(err!("define-record-type: bad field spec {}", print_value(spec)));
         }
         if fields.iter().any(|f| f.eq(name)) {
-            return Err(format!("define-record-type: duplicate field {}", print_value(name)));
+            return Err(err!("define-record-type: duplicate field {}", print_value(name)));
         }
         fields.push(name);
     }
@@ -72,7 +72,7 @@ fn make_record_type(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
 
 /// `(%record-make type field-names values)`: fields not named start out
 /// unspecified.
-fn record_make(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn record_make(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let n = record_type(args[0], "record constructor")?.1.len();
     let mut fields = vec![Value::UNSPECIFIED; n];
     let names = list_arg(args[1], "record constructor")?;

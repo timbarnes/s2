@@ -2,7 +2,7 @@
 
 use std::cmp::Ordering;
 
-use super::{Primitive, char_arg, prim};
+use super::{Error, Primitive, char_arg, prim};
 use crate::value::Value;
 
 pub static PRIMITIVES: &[Primitive] = &[
@@ -101,11 +101,11 @@ fn same(c: char) -> char {
     c
 }
 
-fn compare(args: &[Value], who: &str, key: fn(char) -> char, ok: fn(Ordering) -> bool) -> Result<Value, String> {
+fn compare(args: &[Value], who: &str, key: fn(char) -> char, ok: fn(Ordering) -> bool) -> Result<Value, Error> {
     let cs = args.iter().map(|&a| char_arg(a, who)).collect::<Result<Vec<_>, _>>()?;
     Ok(Value::bool(cs.windows(2).all(|w| ok(key(w[0]).cmp(&key(w[1]))))))
 }
 
-fn test(v: Value, who: &str, f: fn(char) -> bool) -> Result<Value, String> {
+fn test(v: Value, who: &str, f: fn(char) -> bool) -> Result<Value, Error> {
     Ok(Value::bool(f(char_arg(v, who)?)))
 }

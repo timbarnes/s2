@@ -2,6 +2,10 @@
 ;; runs each one after this). A failing test prints a FAIL line; an error
 ;; in a test aborts its top-level form, which s2 reports on stderr.
 
+;; The size of a test's long loop or deep recursion. tests/scheme.rs caps
+;; it under GC stress, where every call collects and big sizes take hours.
+(define (test-size n) n)
+
 (define %tests-run 0)
 (define %tests-failed 0)
 

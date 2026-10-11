@@ -1,7 +1,6 @@
 ;; data_tests.scm: records, bytevectors, and the list, symbol, character,
 ;; string and vector procedures of R7RS 6.1-6.10. Ported from s1's
-;; scheme/data_tests.scm. Left out until P7: the tests of error messages
-;; (they need guard) and of promises.
+;; scheme/data_tests.scm, unchanged.
 
 (display "          === Testing records ===")
 (newline)
@@ -9,6 +8,9 @@
 (test-equal '(#t #f) (list (pare? (kons 1 2)) (pare? (cons 1 2))) "record predicate")
 (test-equal '(1 2) (list (kar (kons 1 2)) (kdr (kons 1 2))) "record accessors")
 (test-equal 3 (let ((k (kons 1 2))) (set-kar! k 3) (kar k)) "record modifier")
+(test-equal "record accessor: expected a <pare> record, got (1 . 2)"
+    (guard (e (#t (error-object-message e))) (kar (cons 1 2)))
+    "an accessor checks the record type")
 (define-record-type <other> (make-other x) other? (x other-x))
 (test-equal #f (pare? (make-other 1)) "record types are distinct")
 (test-equal '(3 5 #t #f)
@@ -22,6 +24,7 @@
 (test-equal 'tail
     (let ((n (make-node 1))) (set-node-next! n 'tail) (node-next n))
     "a field not set by the constructor can be set later")
+(test-equal '(#t #f) (list (promise? (delay 1)) (vector? (delay 1))) "promises are records, not vectors")
 
 (display "          === Testing bytevectors ===")
 (newline)
@@ -36,12 +39,16 @@
 (test-equal "λx" (utf8->string #u8(206 187 120)) "utf8->string")
 (test-equal #u8(206 187) (string->utf8 "aλb" 1 2) "string->utf8 with a range")
 (test-equal #t (equal? #u8(1 2) (bytevector 1 2)) "equal? compares bytevector contents")
+(test-equal 'caught (guard (e (#t 'caught)) (bytevector 256)) "bytes are checked")
 
 (display "          === Testing lists, symbols and booleans ===")
 (newline)
 (define circular (list 'a 'b))
 (set-cdr! (cdr circular) circular)
 (test-equal '(#t #t #f #f) (list (list? '(a b)) (list? '()) (list? '(a . b)) (list? circular)) "list?")
+(test-equal "length: argument must be a proper list"
+    (guard (e (#t (error-object-message e))) (length circular))
+    "length of a circular list is an error, not a hang")
 (test-equal '(3 3) (make-list 2 3) "make-list")
 (test-equal '((1 2 3) "foo" (6 7 8 . 9)) (list (list-copy '(1 2 3)) (list-copy "foo") (list-copy '(6 7 8 . 9)))
     "list-copy")
@@ -112,6 +119,13 @@
 (string-copy! copied 1 "λx")
 (test-equal '("-λx-" #\x) (list copied (string-ref copied 2)) "string-copy! of non-ASCII characters")
 (test-equal '("bλd" "λ𝄞") (list (substring "abλde" 1 4) (string-copy "aλ𝄞" 1)) "substring and string-copy across non-ASCII")
+(test-equal "string-ref: index out of bounds" (guard (e (#t (error-object-message e))) (string-ref "abc" 3))
+    "string-ref past the end")
+(test-equal "string-ref: expected a string, got 5" (guard (e (#t (error-object-message e))) (string-ref 5 0))
+    "string-ref of a non-string")
+(test-equal "string-copy!: the copied characters don't fit at that index"
+    (guard (e (#t (error-object-message e))) (string-copy! (make-string 2 #\a) 1 "xy"))
+    "string-copy! past the end")
 (test-equal "aλc" (let ((s (string-copy "abc"))) (string-copy! s 1 "λ") s) "string-copy! with a multi-byte character")
 
 (display "          === Testing vectors and mapping ===")
@@ -141,4 +155,3 @@
 (test-equal '(0 1 4 9 16)
     (let ((v (make-list 5))) (vector-for-each (lambda (i) (list-set! v i (* i i))) '#(0 1 2 3 4)) v)
     "vector-for-each")
-

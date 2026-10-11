@@ -1,11 +1,8 @@
 ;; port_tests.scm: ports and I/O (R7RS 6.13), and the printer through them.
-;; Ported from s1's scheme/port_tests.scm. Left out until P7: error
-;; messages and file errors (guard), the current ports as parameters
-;; (parameterize, with-output-to-file, with-input-from-file). Left out for
-;; good: s1's procedure-source and its printing of special forms, and its
-;; naming of an anonymous procedure after the first variable it is defined
-;; to (s2 names procedures when they are compiled, P2). The file
-;; tests use call-with-output-file instead of with-output-to-file.
+;; Ported from s1's scheme/port_tests.scm, leaving out s1's extensions:
+;; procedure-source, its printing of special forms, and its naming of an
+;; anonymous procedure after the first variable it is defined to (s2 names
+;; procedures when they are compiled, P2).
 (display "          === Testing ports ===")
 (newline)
 
@@ -41,23 +38,39 @@
     (let ((in (open-input-string "x")) (out (open-output-string)))
       (list (input-port? in) (output-port? out) (textual-port? out) (binary-port? out) (input-port-open? in)))
     "port predicates")
+(test-equal '(#f #t "read-char: the port is closed")
+    (let ((in (open-input-string "x")))
+      (close-port in)
+      (list (input-port-open? in) (input-port? in)
+            (guard (e (#t (error-object-message e))) (read-char in))))
+    "a closed port keeps its kind and refuses reads")
 
 ;; --- current ports are parameters
+(test-equal "captured sym"
+    (let ((out (open-output-string)))
+      (parameterize ((current-output-port out)) (display "captured ") (write 'sym))
+      (get-output-string out))
+    "parameterize current-output-port")
+(test-equal '(x 1)
+    (parameterize ((current-input-port (open-input-string "x 1"))) (list (read) (read)))
+    "parameterize current-input-port")
 (test-equal #t (output-port? (current-error-port)) "current-error-port")
+(test-equal 'rejected (guard (e (#t 'rejected)) (parameterize ((current-output-port 5)) 'no))
+    "the current output port must be an output port")
 
 ;; --- files
 (define port-test-file "target/s2-port-test.tmp")
-(call-with-output-file port-test-file
-  (lambda (out) (display "file text" out) (newline out) (write '(1 "two") out)))
+(with-output-to-file port-test-file (lambda () (display "file text") (newline) (write '(1 "two"))))
 (test-equal '("file text" (1 "two"))
-    (call-with-input-file port-test-file (lambda (in) (let* ((line (read-line in)) (datum (read in))) (list line datum))))
-    "call-with-output-file and call-with-input-file")
+    (with-input-from-file port-test-file (lambda () (list (read-line) (read))))
+    "with-output-to-file and with-input-from-file")
 (test-equal "file text"
     (call-with-input-file port-test-file read-line)
     "call-with-input-file")
 (test-equal #t (file-exists? port-test-file) "file-exists?")
 (delete-file port-test-file)
 (test-equal #f (file-exists? port-test-file) "delete-file")
+(test-equal #t (file-error? (guard (e (#t e)) (delete-file port-test-file))) "deleting a missing file is a file error")
 
 ;; --- binary ports
 (test-equal '(1 1 #u8(2 3) #u8(4 5) #t)
@@ -78,6 +91,9 @@
 (test-equal #u8(0 255 10) (call-with-port (open-binary-input-file port-test-file) (lambda (p) (read-bytevector 10 p)))
     "binary files round trip")
 (delete-file port-test-file)
+(test-equal "write-u8: not a binary output port"
+    (guard (e (#t (error-object-message e))) (write-u8 1 (open-output-string)))
+    "byte output to a textual port is an error")
 
 ;; --- the printer, now observable from Scheme
 (test-equal "(\"a\\\"b\\\\c\\nd\" #\\space #\\x1)" (written (list "a\"b\\c\nd" #\space (integer->char 1)))

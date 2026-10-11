@@ -19,17 +19,38 @@
 //! `Call` and `TailCall`. Every loop is a tail call, and every allocation
 //! happens in a call or between two of them, so these are enough. There,
 //! every live value is in the roots `safepoint` passes to the heap.
+//!
+//! **Control** (plan/03 §10, D8). A few primitives are carried out by the
+//! call instructions themselves, as they rearrange the stacks:
+//!
+//! - `apply` spreads its last argument and calls the procedure;
+//! - `%call/cc` copies both stacks into a `Continuation` and calls its
+//!   argument with it. Calling the continuation copies them back and
+//!   returns its argument to the topmost saved frame;
+//! - `%call/ec` records only the stack heights and the frame to return
+//!   into (an `Escape`). Calling it cuts the stacks back, if that frame is
+//!   still there.
+//!
+//! These are raw: `dynamic-wind`, the user's `call/cc` and exceptions are
+//! written in Scheme on top of them (`scheme/core.scm`).
+//!
+//! **Errors are raised.** When an instruction or a builtin fails, the VM
+//! makes an error object and calls the Scheme procedure `%raise-error`
+//! with it, as if the failing instruction had been that call. So `guard`
+//! catches errors from builtins, unbound variables and bad calls alike.
+//! Only an error nobody handles comes out of `run`, through `%abort`.
 
-use crate::builtins::{PrimFn, Primitive, standard_ports};
-use crate::globals::{Env, cell_name, cell_value};
+use crate::builtins::{Error, ErrorKind, PrimFn, Primitive, standard_ports};
+use crate::globals::{Env, TopBinding, cell_name, cell_value};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
-use crate::printer::print_value;
+use crate::printer::{display_value, print_value};
 use crate::value::Value;
 use crate::vm::op::{Op, Template};
 
 /// A caller's registers, saved while its callee runs.
-struct Frame {
-    closure: GcRef,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Frame {
+    pub closure: GcRef,
     ip: usize,
     fp: usize,
 }
@@ -39,6 +60,12 @@ pub struct Vm {
     frames: Vec<Frame>,
     /// The current input, output and error ports (`builtins::port`).
     pub ports: [Value; 3],
+    /// The names of the procedures that were waiting when the last uncaught
+    /// error happened, innermost first.
+    pub backtrace: Vec<String>,
+    /// How many full continuations `%call/cc` has captured: a statistic,
+    /// for tests that escapes don't need them.
+    pub captures: usize,
 }
 
 /// The template and free variables of a closure.
@@ -75,9 +102,25 @@ fn boxed_name(t: &Template, ip: usize) -> &str {
     }
 }
 
+/// The text of an error that nobody handled: an error object's message
+/// and irritants, or any other raised object.
+pub fn uncaught_message(obj: Value) -> String {
+    match obj.as_obj().map(|o| &o.kind) {
+        Some(Obj::Error { message, irritants, .. }) => {
+            let mut text = display_value(*message);
+            for irritant in list_to_vec(*irritants).unwrap_or_default() {
+                text.push(' ');
+                text.push_str(&print_value(irritant));
+            }
+            text
+        }
+        _ => format!("uncaught exception: {}", print_value(obj)),
+    }
+}
+
 impl Vm {
     pub fn new(heap: &mut Heap) -> Vm {
-        Vm { stack: Vec::new(), frames: Vec::new(), ports: standard_ports(heap) }
+        Vm { stack: Vec::new(), frames: Vec::new(), ports: standard_ports(heap), backtrace: Vec::new(), captures: 0 }
     }
 
     /// The number of frames waiting for a callee to return.
@@ -92,14 +135,27 @@ impl Vm {
         (self.stack.capacity(), self.frames.capacity())
     }
 
+    /// The names of the procedures in the frame stack, innermost first,
+    /// leaving out anonymous ones and those of the exception machinery.
+    pub fn record_backtrace(&mut self) {
+        self.backtrace = self
+            .frames
+            .iter()
+            .rev()
+            .map(|f| parts(f.closure).0.name.to_string())
+            .filter(|n| !n.is_empty() && !n.starts_with('%') && !matches!(n.as_str(), "raise" | "raise-continuable" | "error" | "top-level"))
+            .collect();
+    }
+
     /// Run a top-level template (a procedure of no arguments) and return
     /// its value. `env` is the environment it was compiled for, which VM
-    /// primitives such as `dis` need. An error aborts the whole form; there
-    /// is no `raise` until P7.
+    /// primitives such as `dis` need. An error nobody handles aborts the
+    /// whole form.
     pub fn run(&mut self, heap: &mut Heap, env: &mut Env, template: GcRef) -> Result<Value, String> {
         let closure = heap.closure(template, Box::new([]));
         self.stack.clear();
         self.frames.clear();
+        self.backtrace.clear();
         self.stack.push(closure);
         let result = self.execute(heap, env, closure.as_ref().unwrap());
         if result.is_err() {
@@ -114,11 +170,11 @@ impl Vm {
         let mut ip = 0;
         let mut fp = 1;
 
-        // Return `v` from the running procedure to its caller.
-        macro_rules! do_return {
+        // Continue in the topmost frame, with `v` as the value returned to
+        // it; with no frames left, the top-level form is finished.
+        macro_rules! resume {
             ($v:expr) => {{
                 let v = $v;
-                self.stack.truncate(fp - 1);
                 match self.frames.pop() {
                     Some(frame) => {
                         closure = frame.closure;
@@ -132,7 +188,43 @@ impl Vm {
             }};
         }
 
-        loop {
+        // Return `v` from the running procedure to its caller.
+        macro_rules! do_return {
+            ($v:expr) => {{
+                let v = $v;
+                self.stack.truncate(fp - 1);
+                resume!(v);
+            }};
+        }
+
+        // Raise the error `e` here: call `%raise-error` with an error
+        // object, saving this frame (for the backtrace; a raise never
+        // returns). Before `scheme/core.scm` has defined `%raise-error`,
+        // the error just aborts the form. `$run` is the label of the
+        // instruction loop (labels in macros are hygienic, so each use names
+        // it).
+        macro_rules! fail {
+            ($run:lifetime, $e:expr) => {{
+                let e: Error = $e.into();
+                let Some(handler) = (e.kind != ErrorKind::Uncaught).then(|| raise_hook(heap, env)).flatten() else {
+                    return Err(e.message);
+                };
+                let message = heap.string(&e.message);
+                let irritants = heap.list(e.irritants);
+                let obj = heap.error_object(e.kind, message, irritants);
+                self.frames.push(Frame { closure, ip, fp });
+                let base = self.stack.len();
+                self.stack.push(handler);
+                self.stack.push(obj);
+                closure = handler.as_ref().unwrap();
+                (t, free) = parts(closure);
+                ip = 0;
+                fp = base + 1;
+                continue $run;
+            }};
+        }
+
+        'run: loop {
             let op = t.code[ip];
             ip += 1;
             match op {
@@ -153,7 +245,7 @@ impl Vm {
                 Op::BoxRef => {
                     let v = box_contents(self.stack.pop().unwrap()).get();
                     if v.is_undefined() {
-                        return Err(format!("variable used before its initialisation: {}", boxed_name(t, ip)));
+                        fail!('run, format!("variable used before its initialisation: {}", boxed_name(t, ip)));
                     }
                     self.stack.push(v);
                 }
@@ -165,14 +257,14 @@ impl Vm {
                     let cell = t.consts[k as usize].as_ref().unwrap();
                     let v = cell_value(cell).get();
                     if v.is_undefined() {
-                        return Err(format!("unbound variable: {}", print_value(cell_name(cell))));
+                        fail!('run, format!("unbound variable: {}", print_value(cell_name(cell))));
                     }
                     self.stack.push(v);
                 }
                 Op::GlobalSet(k) => {
                     let cell = t.consts[k as usize].as_ref().unwrap();
                     if cell_value(cell).get().is_undefined() {
-                        return Err(format!("set!: unbound variable: {}", print_value(cell_name(cell))));
+                        fail!('run, format!("set!: unbound variable: {}", print_value(cell_name(cell))));
                     }
                     cell_value(cell).set(self.stack.pop().unwrap());
                 }
@@ -202,60 +294,91 @@ impl Vm {
                     let c = heap.closure(template, captured);
                     self.stack.push(c);
                 }
-                Op::Call(argc) => {
+                Op::Call(argc) | Op::TailCall(argc) => {
+                    let tail = matches!(op, Op::TailCall(_));
                     self.safepoint(heap, env, closure);
                     let base = self.stack.len() - argc as usize - 1;
+                    // A loop, because apply, %call/cc and %call/ec rewrite
+                    // the call into another one.
                     loop {
                         let f = self.stack[base];
                         match f.as_obj().map(|o| &o.kind) {
                             Some(Obj::Closure { template, free: captured }) => {
                                 let callee = template_of(*template);
-                                self.bind_arguments(heap, callee, base)?;
-                                self.frames.push(Frame { closure, ip, fp });
-                                closure = f.as_ref().unwrap();
-                                (t, free) = (callee, captured);
-                                ip = 0;
-                                fp = base + 1;
-                            }
-                            Some(Obj::Primitive(p)) if matches!(p.f, PrimFn::Apply) => {
-                                self.spread_apply(base)?;
-                                continue;
-                            }
-                            Some(Obj::Primitive(p)) => {
-                                let result = self.call_primitive(heap, env, p, base)?;
-                                self.stack.truncate(base);
-                                self.stack.push(result);
-                            }
-                            _ => return Err(format!("not a procedure: {}", print_value(f))),
-                        }
-                        break;
-                    }
-                }
-                Op::TailCall(argc) => {
-                    self.safepoint(heap, env, closure);
-                    let base = self.stack.len() - argc as usize - 1;
-                    loop {
-                        let f = self.stack[base];
-                        match f.as_obj().map(|o| &o.kind) {
-                            Some(Obj::Closure { template, free: captured }) => {
-                                // Slide the callee and its arguments down to
-                                // where the current procedure's callee slot is.
-                                self.stack.drain(fp - 1..base);
-                                let callee = template_of(*template);
-                                self.bind_arguments(heap, callee, fp - 1)?;
+                                let base = if tail {
+                                    // Slide the callee and its arguments down to
+                                    // where the current procedure's callee slot is.
+                                    self.stack.drain(fp - 1..base);
+                                    fp - 1
+                                } else {
+                                    base
+                                };
+                                if let Err(e) = self.bind_arguments(heap, callee, base) {
+                                    fail!('run, e);
+                                }
+                                if !tail {
+                                    self.frames.push(Frame { closure, ip, fp });
+                                    fp = base + 1;
+                                }
                                 closure = f.as_ref().unwrap();
                                 (t, free) = (callee, captured);
                                 ip = 0;
                             }
-                            Some(Obj::Primitive(p)) if matches!(p.f, PrimFn::Apply) => {
-                                self.spread_apply(base)?;
-                                continue;
+                            Some(Obj::Primitive(p)) => match p.f {
+                                PrimFn::Apply => {
+                                    if let Err(e) = self.spread_apply(base) {
+                                        fail!('run, e);
+                                    }
+                                    continue;
+                                }
+                                PrimFn::CallCc | PrimFn::CallEc => {
+                                    let n = self.stack.len() - base - 1;
+                                    if n != 1 {
+                                        fail!('run, format!("{}: wrong number of arguments: {}", p.name, n));
+                                    }
+                                    let here = Frame { closure, ip, fp };
+                                    let k = if matches!(p.f, PrimFn::CallCc) {
+                                        self.capture(heap, tail, base, here)
+                                    } else {
+                                        self.capture_escape(heap, tail, base, here)
+                                    };
+                                    // Now call the argument with the continuation.
+                                    self.stack[base] = self.stack[base + 1];
+                                    self.stack[base + 1] = k;
+                                    continue;
+                                }
+                                _ => match self.call_primitive(heap, env, p, base) {
+                                    Ok(result) if tail => do_return!(result),
+                                    Ok(result) => {
+                                        self.stack.truncate(base);
+                                        self.stack.push(result);
+                                    }
+                                    Err(e) => fail!('run, e),
+                                },
+                            },
+                            Some(Obj::Continuation { stack, frames }) => {
+                                let v = self.arguments_as_value(heap, base);
+                                self.stack.clear();
+                                self.stack.extend_from_slice(stack);
+                                self.frames.clear();
+                                self.frames.extend_from_slice(frames);
+                                resume!(v);
                             }
-                            Some(Obj::Primitive(p)) => {
-                                let result = self.call_primitive(heap, env, p, base)?;
-                                do_return!(result);
+                            Some(Obj::Escape { stack_len, frames_len, frame }) => {
+                                let (stack_len, frames_len, frame) = (*stack_len, *frames_len, *frame);
+                                let live = match frame {
+                                    Some(fr) => self.frames.get(frames_len) == Some(&fr) && self.stack.len() >= stack_len,
+                                    None => true,
+                                };
+                                if !live {
+                                    fail!('run, "escape continuation invoked after its extent has ended");
+                                }
+                                let v = self.arguments_as_value(heap, base);
+                                self.stack.truncate(stack_len);
+                                self.frames.truncate(frames_len + frame.is_some() as usize);
+                                resume!(v);
                             }
-                            _ => return Err(format!("not a procedure: {}", print_value(f))),
+                            _ => fail!('run, format!("not a procedure: {}", print_value(f))),
                         }
                         break;
                     }
@@ -265,9 +388,42 @@ impl Vm {
         }
     }
 
+    /// Capture the continuation of a call to `%call/cc` in slot `base`:
+    /// copies of the stacks as they will be when the call returns, with the
+    /// frame to return into (`here`, the running procedure, unless the call
+    /// is a tail call) on top.
+    fn capture(&mut self, heap: &mut Heap, tail: bool, base: usize, here: Frame) -> Value {
+        self.captures += 1;
+        let (stack_len, mut frames) = (if tail { here.fp - 1 } else { base }, self.frames.clone());
+        if !tail {
+            frames.push(here);
+        }
+        heap.continuation(self.stack[..stack_len].to_vec(), frames)
+    }
+
+    /// Capture an escape-only continuation of a call to `%call/ec`: the same
+    /// as `capture`, but recording only where the stacks will be.
+    fn capture_escape(&mut self, heap: &mut Heap, tail: bool, base: usize, here: Frame) -> Value {
+        if !tail {
+            return heap.escape(base, self.frames.len(), Some(here));
+        }
+        match self.frames.last() {
+            Some(&caller) => heap.escape(here.fp - 1, self.frames.len() - 1, Some(caller)),
+            None => heap.escape(0, 0, None),
+        }
+    }
+
+    /// The arguments above slot `base`, as the one value a continuation
+    /// returns: the argument itself, or a `values` object.
+    fn arguments_as_value(&mut self, heap: &mut Heap, base: usize) -> Value {
+        let args = self.stack.split_off(base + 1);
+        heap.values(args)
+    }
+
     /// Collect garbage if a collection is due. The roots are the value
-    /// stack, the closures saved in frames, the running closure, and the
-    /// environment's binding cells (the heap adds the symbol table).
+    /// stack, the closures saved in frames, the running closure, the
+    /// current ports, and the environment's binding cells (the heap adds
+    /// the symbol table).
     #[inline]
     fn safepoint(&self, heap: &mut Heap, env: &Env, closure: GcRef) {
         if heap.needs_gc() {
@@ -311,10 +467,10 @@ impl Vm {
     }
 
     /// Call primitive `p`, whose arguments are above slot `base`.
-    fn call_primitive(&mut self, heap: &mut Heap, env: &mut Env, p: &Primitive, base: usize) -> Result<Value, String> {
+    fn call_primitive(&mut self, heap: &mut Heap, env: &mut Env, p: &Primitive, base: usize) -> Result<Value, Error> {
         let n = self.stack.len() - base - 1;
         if n < p.min || p.max.is_some_and(|max| n > max) {
-            return Err(format!("{}: wrong number of arguments: {}", p.name, n));
+            return Err(format!("{}: wrong number of arguments: {}", p.name, n).into());
         }
         match p.f {
             PrimFn::Builtin(f) => f(heap, &self.stack[base + 1..]),
@@ -322,7 +478,20 @@ impl Vm {
                 let args = self.stack[base + 1..].to_vec();
                 f(self, heap, env, &args)
             }
-            PrimFn::Apply => unreachable!("apply is spread before the call"),
+            PrimFn::Apply | PrimFn::CallCc | PrimFn::CallEc => unreachable!("handled by the call instructions"),
         }
+    }
+}
+
+/// The procedure errors are raised through, `%raise-error`, if
+/// `scheme/core.scm` has defined it.
+fn raise_hook(heap: &mut Heap, env: &Env) -> Option<Value> {
+    let name = heap.intern("%raise-error").as_ref().unwrap();
+    match env.lookup(name)? {
+        TopBinding::Variable(cell) => {
+            let v = cell_value(cell).get();
+            matches!(v.as_obj().map(|o| &o.kind), Some(Obj::Closure { .. })).then_some(v)
+        }
+        _ => None,
     }
 }

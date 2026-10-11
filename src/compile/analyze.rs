@@ -10,7 +10,7 @@
 //! the tree knowing whether the current expression's value is returned
 //! (`tail` in codegen.rs).
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 
 use crate::compile::ast::{Expr, Lambda, VarId};
 
@@ -72,12 +72,16 @@ fn walk(e: &Expr, bound: &mut FxHashSet<VarId>, refs: &mut Vec<VarId>) {
 }
 
 /// The variables that live in a box rather than directly in a stack slot
-/// or closure (03 §7). A flat closure copies values, so a variable needs a
-/// box when a copy could go stale or be taken too early:
+/// or closure (03 §7). Closures and continuations copy values (a flat
+/// closure copies its free variables, and `call/cc` copies the stack), so a
+/// variable needs a box when a copy could go stale or be taken too early:
 ///
-/// - **assigned and captured**: `set!` on it, and a reference from a lambda
-///   other than the one binding it. Without a box, the closure's copy and
-///   the variable would go their separate ways after the `set!`.
+/// - **assigned** with `set!`. Without a box, a closure's copy and the
+///   variable would go their separate ways after the `set!`, and so would
+///   a continuation's copy of the stack slot: re-entering it would bring
+///   back the value the variable had when the continuation was captured.
+///   (P4 boxed only variables that were also captured by a closure, which
+///   was right until continuations could be re-entered, in P7.)
 /// - **referenced before it is initialised**: a `letrec` variable used in
 ///   its own init or an earlier one, such as a recursive procedure
 ///   referring to itself. The closure is made while the variable is still
@@ -87,23 +91,18 @@ fn walk(e: &Expr, bound: &mut FxHashSet<VarId>, refs: &mut Vec<VarId>) {
 ///
 /// A `letrec` variable used only after its init (in later inits or the
 /// body) needs no box: its init is an ordinary assignment to a stack slot,
-/// before anything can copy it.
+/// before anything can copy it. Re-entering a continuation captured during
+/// a later init repeats the inits after it, so a copied slot is right.
 pub fn boxed_variables(e: &Expr) -> FxHashSet<VarId> {
     let mut b = Boxing::default();
-    b.walk(e, 0);
-    let mut boxed: FxHashSet<VarId> = b.assigned.intersection(&b.captured).copied().collect();
-    boxed.extend(b.early);
-    boxed
+    b.walk(e);
+    b.assigned.extend(b.early);
+    b.assigned
 }
 
 #[derive(Default)]
 struct Boxing {
-    /// The lambda binding each variable: 0 for the top-level form, then
-    /// lambdas numbered as they are met.
-    owner: FxHashMap<VarId, u32>,
-    lambdas: u32,
     assigned: FxHashSet<VarId>,
-    captured: FxHashSet<VarId>,
     /// `letrec` variables whose init hasn't run yet, at this point of the
     /// walk.
     pending: FxHashSet<VarId>,
@@ -111,61 +110,44 @@ struct Boxing {
 }
 
 impl Boxing {
-    /// `id` is used (referenced or assigned) inside lambda `current`.
-    fn used(&mut self, id: VarId, current: u32) {
-        if self.owner[&id] != current {
-            self.captured.insert(id);
-        }
+    fn used(&mut self, id: VarId) {
         if self.pending.contains(&id) {
             self.early.insert(id);
         }
     }
 
-    fn walk(&mut self, e: &Expr, current: u32) {
+    fn walk(&mut self, e: &Expr) {
         match e {
             Expr::Const(_) | Expr::GlobalRef(_) => {}
-            Expr::LocalRef(id) => self.used(*id, current),
+            Expr::LocalRef(id) => self.used(*id),
             Expr::LocalSet(id, value) => {
-                self.used(*id, current);
+                self.used(*id);
                 self.assigned.insert(*id);
-                self.walk(value, current);
+                self.walk(value);
             }
-            Expr::GlobalDefine(_, value) | Expr::GlobalSet(_, value) => self.walk(value, current),
+            Expr::GlobalDefine(_, value) | Expr::GlobalSet(_, value) => self.walk(value),
             Expr::If(test, then, els) => {
-                self.walk(test, current);
-                self.walk(then, current);
-                self.walk(els, current);
+                self.walk(test);
+                self.walk(then);
+                self.walk(els);
             }
-            Expr::Seq(body) => body.iter().for_each(|e| self.walk(e, current)),
-            Expr::Lambda(l) => {
-                self.lambdas += 1;
-                let me = self.lambdas;
-                for p in l.params.iter().chain(&l.rest) {
-                    self.owner.insert(p.id, me);
-                }
-                self.walk(&l.body, me);
-            }
+            Expr::Seq(body) => body.iter().for_each(|e| self.walk(e)),
+            Expr::Lambda(l) => self.walk(&l.body),
             Expr::Call(f, args) => {
-                self.walk(f, current);
-                args.iter().for_each(|e| self.walk(e, current));
+                self.walk(f);
+                args.iter().for_each(|e| self.walk(e));
             }
             Expr::Let(bindings, body) => {
-                for (var, init) in bindings {
-                    self.walk(init, current);
-                    self.owner.insert(var.id, current);
-                }
-                self.walk(body, current);
+                bindings.iter().for_each(|(_, init)| self.walk(init));
+                self.walk(body);
             }
             Expr::Letrec(bindings, body) => {
-                for (var, _) in bindings {
-                    self.owner.insert(var.id, current);
-                    self.pending.insert(var.id);
-                }
+                self.pending.extend(bindings.iter().map(|(v, _)| v.id));
                 for (var, init) in bindings {
-                    self.walk(init, current);
+                    self.walk(init);
                     self.pending.remove(&var.id);
                 }
-                self.walk(body, current);
+                self.walk(body);
             }
         }
     }

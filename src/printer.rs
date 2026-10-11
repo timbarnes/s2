@@ -243,6 +243,31 @@ fn print_into(out: &mut String, v: Value, ctx: &mut Ctx) {
             _ => unreachable!(),
         },
         Obj::Box(_) => out.push_str("#<box>"),
+        Obj::Continuation { .. } | Obj::Escape { .. } => out.push_str("#<continuation>"),
+        // Several values print separated by spaces; the REPL prints them
+        // one per line instead.
+        Obj::Values(items) => {
+            for (i, &v) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                print_into(out, v, ctx);
+            }
+        }
+        Obj::Error { message, irritants, .. } => {
+            out.push_str("#<error ");
+            let saved = ctx.write;
+            ctx.write = true;
+            print_into(out, *message, ctx);
+            let mut rest = *irritants;
+            while let Some(Obj::Pair { car, cdr }) = rest.as_obj().map(|o| &o.kind) {
+                out.push(' ');
+                print_into(out, car.get(), ctx);
+                rest = cdr.get();
+            }
+            ctx.write = saved;
+            out.push('>');
+        }
         Obj::Port(p) => out.push_str(&describe_port(&p.borrow())),
         Obj::RecordType { name, .. } => {
             out.push_str("#<record-type ");

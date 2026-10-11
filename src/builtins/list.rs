@@ -2,7 +2,7 @@
 //! `for-each`, `member` and `assoc`, which call procedures, are in
 //! `scheme/core.scm`.
 
-use super::{Primitive, expected, fixnum, index_arg, kind, list_arg, pair_arg, prim};
+use super::{Error, err, Primitive, expected, fixnum, index_arg, kind, list_arg, pair_arg, prim};
 use crate::heap::{Heap, Obj, eqv};
 use crate::value::Value;
 
@@ -77,7 +77,7 @@ pub static PRIMITIVES: &[Primitive] = &[
 
 /// `caar` … `cddddr`: the letters between `c` and `r`, applied right to
 /// left.
-fn cxr(v: Value, name: &str) -> Result<Value, String> {
+fn cxr(v: Value, name: &str) -> Result<Value, Error> {
     let mut v = v;
     for op in name[1..name.len() - 1].chars().rev() {
         let (car, cdr) = pair_arg(v, name)?;
@@ -108,7 +108,7 @@ fn proper_length(v: Value) -> Option<usize> {
 
 /// The lists appended; the last argument is shared, not copied, and may be
 /// any value.
-fn append(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn append(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let Some((&last, init)) = args.split_last() else { return Ok(Value::NIL) };
     let mut items = Vec::new();
     for &list in init {
@@ -117,16 +117,16 @@ fn append(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     Ok(items.into_iter().rev().fold(last, |tail, v| heap.cons(v, tail)))
 }
 
-fn list_tail(list: Value, k: Value, who: &str) -> Result<Value, String> {
+fn list_tail(list: Value, k: Value, who: &str) -> Result<Value, Error> {
     let mut v = list;
     for _ in 0..super::index_arg(k, who)? {
-        v = pair_arg(v, who).map_err(|_| format!("{}: index out of range", who))?.1.get();
+        v = pair_arg(v, who).map_err(|_| err!("{}: index out of range", who))?.1.get();
     }
     Ok(v)
 }
 
 /// A copy of the pairs of a list; the final cdr (and a non-list) is shared.
-fn list_copy(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn list_copy(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let mut items = Vec::new();
     let mut v = args[0];
     while let Ok((car, cdr)) = pair_arg(v, "") {
@@ -136,7 +136,7 @@ fn list_copy(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
     Ok(items.into_iter().rev().fold(v, |tail, x| heap.cons(x, tail)))
 }
 
-fn mem_by(args: &[Value], who: &str, same: fn(Value, Value) -> bool) -> Result<Value, String> {
+fn mem_by(args: &[Value], who: &str, same: fn(Value, Value) -> bool) -> Result<Value, Error> {
     let mut list = args[1];
     while !list.is_nil() {
         let (car, cdr) = pair_arg(list, who).map_err(|_| expected(who, "a list", args[1]))?;
@@ -148,7 +148,7 @@ fn mem_by(args: &[Value], who: &str, same: fn(Value, Value) -> bool) -> Result<V
     Ok(Value::FALSE)
 }
 
-fn ass_by(args: &[Value], who: &str, same: fn(Value, Value) -> bool) -> Result<Value, String> {
+fn ass_by(args: &[Value], who: &str, same: fn(Value, Value) -> bool) -> Result<Value, Error> {
     let mut list = args[1];
     while !list.is_nil() {
         let (car, cdr) = pair_arg(list, who).map_err(|_| expected(who, "a list", args[1]))?;

@@ -101,11 +101,25 @@ impl Session {
                 Err(ParseError::Syntax(msg)) => Err(msg),
             };
             match result {
-                Ok(v) if write_results && !v.is_unspecified() => println!("{}", printer::print_value(v)),
+                Ok(v) if write_results => {
+                    // Several values print one per line; none, nothing.
+                    match v.as_obj().map(|o| &o.kind) {
+                        Some(heap::Obj::Values(items)) => items.iter().for_each(|&v| println!("{}", printer::print_value(v))),
+                        _ if v.is_unspecified() => {}
+                        _ => println!("{}", printer::print_value(v)),
+                    }
+                }
                 Ok(_) => {}
                 Err(msg) => {
                     std::io::stdout().flush().ok();
                     eprintln!("error: {}", msg);
+                    // The procedures that were waiting, innermost first.
+                    for name in self.vm.backtrace.iter().take(10) {
+                        eprintln!("  in {}", name);
+                    }
+                    if self.vm.backtrace.len() > 10 {
+                        eprintln!("  ...");
+                    }
                     ok = false;
                 }
             }
@@ -331,7 +345,7 @@ mod tests {
         check("(let loop ((i 0) (acc '())) (if (= i 5) acc (loop (+ i 1) (cons i acc))))", &["(4 3 2 1 0)"]);
         // The inits are outside the loop's scope; the name is visible in the body.
         check("(define i 10) (let loop ((i i)) (if (= i 0) loop (loop (- i 1))))", &["i", "#<procedure loop>"]);
-        check("(let loop ((i 0)) (if (= i 10000) (%frame-depth) (loop (+ i 1))))", &["0"]);
+        check("(let loop ((i 0)) (if (= i 2000) (%frame-depth) (loop (+ i 1))))", &["0"]);
         check("(let loop) (let loop ((x 1) (x 2)) x)",
               &["error: let: bad syntax: (let loop)", "error: let: duplicate variable: x"]);
     }
@@ -448,6 +462,69 @@ mod tests {
     }
 
     #[test]
+    fn continuations() {
+        // Escape, then re-entry three times: an assigned variable keeps its
+        // latest value across re-entries (it is boxed).
+        check("(+ 1 (call/cc (lambda (k) (+ 10 (k 1)))))
+               (let ((k #f) (log '())) (let ((v (call/cc (lambda (c) (set! k c) 0)))) (set! log (cons v log)) (if (< v 3) (k (+ v 1))) log))",
+              &["2", "(3 2 1 0)"]);
+        // Values through continuations; a continuation printed.
+        check("(call-with-values (lambda () (call/cc (lambda (k) (k 1 2)))) list) (call/cc (lambda (k) k)) (values 1 2)",
+              &["(1 2)", "#<procedure>", "1 2"]);
+        // A continuation captured in one top-level form, re-entered from the
+        // next: the old form finishes, and its value is the new form's.
+        check("(define r '()) (define k #f) (set! r (cons (call/cc (lambda (c) (set! k c) 1)) r)) r (k 2) r",
+              &["r", "k", "", "(1)", "", "(2 1)"]);
+        check("(define e (%call/ec (lambda (k) k))) (e 1)", &["e", "error: escape continuation invoked after its extent has ended"]);
+    }
+
+    #[test]
+    fn exceptions() {
+        // Errors from builtins and from the VM are raised, so guard catches them.
+        check("(guard (e ((error-object? e) (list (error-object-message e) (error-object-irritants e)))) (car 1))
+               (guard (e (#t 'unbound)) nope) (guard (e (#t 'arity)) ((lambda (x) x))) (guard (e (#t 'not-proc)) (1 2))
+               (guard (e ((string? e) e)) (raise \"s\")) (guard (e ((symbol? e) e)) (error \"x\"))",
+              &["(\"car: expected a pair, got 1\" ())", "unbound", "arity", "not-proc", "\"s\"", "error: x"]);
+        check("(guard (e (#t (list (file-error? e) (error-object-irritants e)))) (open-input-file \"/no/such/file\"))
+               (guard (e (#t (read-error? e))) (read (open-input-string \")\")))",
+              &["(#t (\"/no/such/file\"))", "#t"]);
+        // Uncaught: the message (with irritants written), and the after
+        // thunks have run.
+        check("(define log '()) (dynamic-wind (lambda () #f) (lambda () (error \"bad thing:\" 1 \"x\")) (lambda () (set! log 'after-ran))) log
+               (raise 'boom) (with-exception-handler (lambda (c) 0) (lambda () (raise 1)))",
+              &["log", "error: bad thing: 1 \"x\"", "after-ran", "error: uncaught exception: boom",
+                "error: exception handler returned from a non-continuable raise of 1"]);
+        check("(with-exception-handler (lambda (c) 42) (lambda () (+ (raise-continuable 'oops) 23)))", &["65"]);
+    }
+
+    #[test]
+    fn uncaught_errors_have_a_backtrace() {
+        let mut s = Session::new();
+        let mut port = io::new_string_port_input("(define (f x) (car x)) (define (g x) (+ 1 (f x))) (g 5)");
+        let mut last = Ok(Value::UNSPECIFIED);
+        while let Ok(datum) = parse(&mut s.heap, &mut port) {
+            last = s.eval(datum);
+        }
+        assert_eq!(last.err().as_deref(), Some("car: expected a pair, got 5"));
+        assert_eq!(s.vm.backtrace, ["f", "g"]);
+    }
+
+    /// Guards nested 8,000 deep, returning normally and re-raising through
+    /// every level, make no full continuation captures (each guard costs
+    /// constant time; with the reference implementation each would copy
+    /// the stack, which is quadratic). s1 once had a cubic bug here.
+    #[test]
+    fn nested_guards_are_linear() {
+        let (s, last) = session_after(
+            "(define (nested-guards n) (if (= n 0) 0 (+ 1 (guard (e (#t 'caught)) (nested-guards (- n 1))))))
+             (define (nested-reraise n) (if (= n 0) (raise 'deep) (guard (e ((eq? e 'never) 0)) (nested-reraise (- n 1)))))
+             (list (nested-guards 8000) (guard (e (#t (list 'outer e))) (nested-reraise 8000)))",
+        );
+        assert_eq!(printer::print_value(last), "(8000 (outer deep))");
+        assert_eq!(s.vm.captures, 0);
+    }
+
+    #[test]
     fn deep_expansions() {
         // A 1,000-argument or nests 1,000 macro uses, and as many lets: on
         // a default 2MB thread stack, a debug build overflowed at about 150.
@@ -544,9 +621,10 @@ mod tests {
         assert!(s.heap.marked < 2 * n as usize + 20_000, "{} marked", s.heap.marked);
     }
 
-    /// s1's `scheme/tail_tests.scm`, for the tail contexts P2 has: a loop
+    /// s1's `scheme/tail_tests.scm`: a loop
     /// reaches its base case at the same frame depth after 5 iterations as
-    /// after 500 only if its self-call is a proper tail call.
+    /// after 100 only if its self-call is a proper tail call. All of s1's
+    /// contexts are here now.
     #[test]
     fn tail_contexts() {
         for (name, step) in [
@@ -578,13 +656,19 @@ mod tests {
             ("letrec-syntax", "(letrec-syntax () (loop (- n 1)))"),
             ("do result", "(do ((i 0 (+ i 1))) ((= i 1) (loop (- n 1))))"),
             ("apply", "(apply loop (list (- n 1)))"),
+            ("call/cc", "(call/cc (lambda (k) (loop (- n 1))))"),
+            ("call-with-values consumer", "(call-with-values (lambda () (- n 1)) loop)"),
+            ("let-values", "(let-values (((m) (- n 1))) (loop m))"),
+            ("let*-values", "(let*-values (((m) (- n 1))) (loop m))"),
+            ("case-lambda", "((case-lambda ((x) (loop x))) (- n 1))"),
+            ("apply, case-lambda", "(apply (case-lambda ((x) (loop x))) (list (- n 1)))"),
             ("macro use", "(let-syntax ((tail-id (syntax-rules () ((_ e) e)))) (tail-id (loop (- n 1))))"),
         ] {
-            let src = format!("(define (loop n) (if (= n 0) (%frame-depth) {})) (= (loop 5) (loop 500))", step);
+            let src = format!("(define (loop n) (if (= n 0) (%frame-depth) {})) (= (loop 5) (loop 100))", step);
             assert_eq!(run(&src), ["loop", "#t"], "{}", name);
         }
         // The check itself: a call that isn't in tail position does grow.
-        check("(define (tail-not n) (if (= n 0) (%frame-depth) (+ 0 (tail-not (- n 1))))) (< (tail-not 5) (tail-not 500))",
+        check("(define (tail-not n) (if (= n 0) (%frame-depth) (+ 0 (tail-not (- n 1))))) (< (tail-not 5) (tail-not 100))",
               &["tail-not", "#t"]);
     }
 

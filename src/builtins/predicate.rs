@@ -2,7 +2,7 @@
 //! Forked from s1's `builtin/predicate.rs`, without its extensions
 //! (`type-of`, `procedure-source`).
 
-use super::{Primitive, expected, kind, prim, string_arg};
+use super::{Error, Primitive, expected, kind, prim, string_arg};
 use crate::heap::{Heap, Obj, eqv, equal};
 use crate::value::Value;
 
@@ -27,14 +27,14 @@ fn is_symbol(v: Value) -> bool {
 }
 
 /// `boolean=?`, `symbol=?`: every argument has the type, and all are `eq?`.
-fn all_same(args: &[Value], who: &str, what: &str, is: fn(Value) -> bool) -> Result<Value, String> {
+fn all_same(args: &[Value], who: &str, what: &str, is: fn(Value) -> bool) -> Result<Value, Error> {
     if let Some(&bad) = args.iter().find(|&&a| !is(a)) {
         return Err(expected(who, what, bad));
     }
     Ok(Value::bool(args.windows(2).all(|w| w[0].eq(w[1]))))
 }
 
-fn symbol_to_string(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
+fn symbol_to_string(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     match kind(args[0]) {
         Some(Obj::Symbol(name)) => Ok(heap.string(name)),
         _ => Err(expected("symbol->string", "a symbol", args[0])),
