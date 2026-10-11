@@ -31,6 +31,11 @@ mod vm;
 
 use std::io::{IsTerminal, Write};
 
+/// The global allocator: mimalloc, as in s1, so benchmarks against s1
+/// compare like with like.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use globals::Env;
 use heap::Heap;
 use io::PortKind;
@@ -41,6 +46,7 @@ use value::Value;
 struct Session {
     heap: Heap,
     env: Env,
+    vm: vm::Vm,
     dis: bool,
 }
 
@@ -49,16 +55,16 @@ impl Session {
         let mut heap = Heap::new();
         let mut env = Env::default();
         builtins::install(&mut heap, &mut env);
-        Session { heap, env, dis }
+        Session { heap, env, vm: vm::Vm::default(), dis }
     }
 
     /// Compile one top-level form and run it.
     fn eval(&mut self, datum: Value) -> Result<Value, String> {
         let template = compile::compile(&mut self.heap, &mut self.env, datum)?;
         if self.dis {
-            print!("{}", compile::disasm::disassemble(&template));
+            print!("{}", compile::disasm::disassemble(template));
         }
-        vm::run(&mut self.heap, &mut self.env, &template)
+        self.vm.run(&mut self.heap, &mut self.env, template)
     }
 
     /// Evaluate every form from `port`. Returns false if any form had an
@@ -191,6 +197,86 @@ mod tests {
     }
 
     #[test]
+    fn procedures() {
+        check("(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2))))) (fib 20)", &["fib", "6765"]);
+        check("((lambda (x y) (cons y x)) 1 2)", &["(2 . 1)"]);
+        check("(define (f) 42) (f) f (lambda (x) x)", &["f", "42", "#<procedure f>", "#<procedure>"]);
+        check("(define g (lambda (x) x)) g", &["g", "#<procedure g>"]);
+    }
+
+    #[test]
+    fn rest_arguments() {
+        check("((lambda args args)) ((lambda args args) 1 2) ((lambda (a . r) (cons a r)) 1 2 3) ((lambda (a . r) r) 1)",
+              &["()", "(1 2)", "(1 2 3)", "()"]);
+        check("(define (f a b . c) c) (f 1 2) (f 1 2 3 4)", &["f", "()", "(3 4)"]);
+    }
+
+    #[test]
+    fn closures_capture() {
+        // Currying, composition, and a captured variable from two levels up.
+        check("(define (add n) (lambda (x) (+ x n))) ((add 3) 4) (define add5 (add 5)) (add5 10) ((add 1) 1)",
+              &["add", "7", "add5", "15", "2"]);
+        check("(define (compose f g) (lambda (x) (f (g x)))) ((compose car cdr) '(1 2 3))", &["compose", "2"]);
+        check("(define (curry3 f) (lambda (a) (lambda (b) (lambda (c) (f a b c))))) ((((curry3 +) 1) 2) 3)",
+              &["curry3", "6"]);
+        // Each closure has its own copy of the captured values.
+        check("(define (k x) (lambda () x)) (define k1 (k 1)) (define k2 (k 2)) (k1) (k2)",
+              &["k", "k1", "k2", "1", "2"]);
+    }
+
+    #[test]
+    fn let_and_scope() {
+        check("(let ((x 1) (y 2)) (+ x y)) (+ 1 (let ((x 2)) (* x 10)) 3)", &["3", "24"]);
+        // The inits are evaluated outside the let's scope.
+        check("(define x 10) (let ((x 1) (y x)) y)", &["x", "10"]);
+        // Shadowing: inner bindings hide outer ones, globals and keywords.
+        check("(let ((x 1)) (let ((x 2)) x)) ((lambda (car) car) 5) ((lambda (if) (if 1 2)) cons)",
+              &["2", "5", "(1 . 2)"]);
+        // Sibling lets reuse slots; the outer variable is untouched.
+        check("(let ((a 1)) (+ (let ((b 2)) b) (let ((c 3)) c) a))", &["6"]);
+        check("(let () 5)", &["5"]);
+    }
+
+    #[test]
+    fn tail_calls_run_in_constant_space() {
+        let mut s = Session::new(false);
+        let mut port = io::new_string_port_input(
+            "(define (loop n) (if (= n 0) (%frame-depth) (loop (- n 1)))) (loop 1000000)",
+        );
+        let mut last = Value::UNSPECIFIED;
+        while let Ok(datum) = parse(&mut s.heap, &mut port) {
+            last = s.eval(datum).unwrap();
+        }
+        assert_eq!(last.as_fixnum(), Some(0));
+        let (stack, frames) = s.vm.high_water();
+        assert!(stack < 64 && frames < 64, "stack {} frames {}", stack, frames);
+        // A non-tail call does grow the frame stack.
+        check("(define (deep n) (if (= n 0) (%frame-depth) (+ 0 (deep (- n 1))))) (deep 100)", &["deep", "100"]);
+    }
+
+    /// s1's `scheme/tail_tests.scm`, for the tail contexts P2 has: a loop
+    /// reaches its base case at the same frame depth after 5 iterations as
+    /// after 500 only if its self-call is a proper tail call.
+    #[test]
+    fn tail_contexts() {
+        for (name, step) in [
+            ("if", "(if #t (loop (- n 1)) 0)"),
+            ("if, else branch", "(if #f 0 (loop (- n 1)))"),
+            ("let", "(let ((m (- n 1))) (loop m))"),
+            ("let body, last of several", "(let ((m (- n 1))) 1 (loop m))"),
+            ("begin", "(begin 1 (loop (- n 1)))"),
+            ("lambda body", "((lambda () (loop (- n 1))))"),
+            ("lambda body, last of several", "((lambda () 1 (loop (- n 1))))"),
+        ] {
+            let src = format!("(define (loop n) (if (= n 0) (%frame-depth) {})) (= (loop 5) (loop 500))", step);
+            assert_eq!(run(&src), ["loop", "#t"], "{}", name);
+        }
+        // The check itself: a call that isn't in tail position does grow.
+        check("(define (tail-not n) (if (= n 0) (%frame-depth) (+ 0 (tail-not (- n 1))))) (< (tail-not 5) (tail-not 500))",
+              &["tail-not", "#t"]);
+    }
+
+    #[test]
     fn errors_abort_the_form_only() {
         check("y (define y 5) y", &["error: unbound variable: y", "y", "5"]);
         check("(car 1)", &["error: car: not a pair: 1"]);
@@ -200,5 +286,16 @@ mod tests {
         check("()", &["error: empty combination: ()"]);
         check("(if 1)", &["error: if: bad syntax: (if 1)"]);
         check("(+ (define z 1) 2)", &["error: define: only allowed at top level: (define z 1)"]);
+        check("(define (f x) x) (f) (f 1 2) ((lambda (a . b) a))",
+              &["f", "error: f: wrong number of arguments: 0 (expected 1)",
+                "error: f: wrong number of arguments: 2 (expected 1)",
+                "error: #<procedure>: wrong number of arguments: 0 (expected at least 1)"]);
+        check("(lambda (x x) x)", &["error: lambda: duplicate parameter: x"]);
+        check("(lambda (1) x)", &["error: lambda: bad parameter: 1"]);
+        check("(lambda (x))", &["error: lambda: bad syntax: (lambda (x))"]);
+        check("(let ((x 1) (x 2)) x)", &["error: let: duplicate variable: x"]);
+        // An error deep in a call chain leaves the VM ready for the next form.
+        check("(define (g n) (if (= n 0) (car 0) (+ 1 (g (- n 1))))) (g 10) (g 0) 7",
+              &["g", "error: car: not a pair: 0", "error: car: not a pair: 0", "7"]);
     }
 }

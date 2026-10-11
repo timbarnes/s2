@@ -1,0 +1,16 @@
+template top-level
+   0  MakeClosure k0   ; #<template f>
+   1  GlobalDefine k1  ; f
+   2  Return
+template f  arity 1+
+   0  GlobalRef k0     ; cons
+   1  LocalRef 0       ; a
+   2  LocalRef 1       ; more
+   3  TailCall 2
+template top-level
+   0  MakeClosure k0   ; #<template g>
+   1  GlobalDefine k1  ; g
+   2  Return
+template g  arity 0+
+   0  LocalRef 0       ; all
+   1  Return

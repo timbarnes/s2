@@ -1,0 +1,34 @@
+template top-level
+   0  MakeClosure k0   ; #<template compose>
+   1  GlobalDefine k1  ; compose
+   2  Return
+template compose  arity 2
+   0  LocalRef 0       ; f
+   1  LocalRef 1       ; g
+   2  MakeClosure k0   ; #<template>
+   3  Return
+template (lambda)  arity 1  free 2
+   0  FreeRef 0        ; f
+   1  FreeRef 1        ; g
+   2  LocalRef 0       ; x
+   3  Call 1
+   4  TailCall 1
+template top-level
+   0  MakeClosure k0   ; #<template adder3>
+   1  GlobalDefine k1  ; adder3
+   2  Return
+template adder3  arity 1
+   0  LocalRef 0       ; n
+   1  MakeClosure k0   ; #<template>
+   2  Return
+template (lambda)  arity 1  free 1
+   0  FreeRef 0        ; n
+   1  LocalRef 0       ; a
+   2  MakeClosure k0   ; #<template>
+   3  Return
+template (lambda)  arity 1  free 2
+   0  GlobalRef k0     ; +
+   1  FreeRef 0        ; n
+   2  FreeRef 1        ; a
+   3  LocalRef 0       ; b
+   4  TailCall 3

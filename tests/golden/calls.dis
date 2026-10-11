@@ -2,8 +2,7 @@ template top-level
    0  GlobalRef k0     ; *
    1  Fixnum 6
    2  Fixnum 7
-   3  Call 2
-   4  Return
+   3  TailCall 2
 template top-level
    0  GlobalRef k0     ; +
    1  GlobalRef k1     ; *
@@ -17,5 +16,4 @@ template top-level
    9  Fixnum 2
   10  Call 2
   11  Call 2
-  12  Call 2
-  13  Return
+  12  TailCall 2

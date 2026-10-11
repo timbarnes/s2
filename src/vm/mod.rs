@@ -3,5 +3,5 @@
 pub mod machine;
 pub mod op;
 
-pub use machine::run;
+pub use machine::Vm;
 pub use op::{Op, Template};

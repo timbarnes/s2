@@ -237,6 +237,13 @@ fn print_into(out: &mut String, v: Value, ctx: &mut Ctx) {
             out.push('>');
         }
         Obj::Primitive(p) => out.push_str(&format!("#<procedure {}>", p.name)),
+        Obj::Closure { template, .. } => match &template.get().kind {
+            Obj::Template(t) if t.name.is_empty() => out.push_str("#<procedure>"),
+            Obj::Template(t) => out.push_str(&format!("#<procedure {}>", t.name)),
+            _ => unreachable!(),
+        },
+        Obj::Template(t) if t.name.is_empty() => out.push_str("#<template>"),
+        Obj::Template(t) => out.push_str(&format!("#<template {}>", t.name)),
     }
 }
 

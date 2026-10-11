@@ -6,9 +6,9 @@
 //! functions below can index `args` directly.
 //!
 //! A few procedures need more than the heap: `dis` (and later `eval`) must
-//! compile, which needs the top-level environment. These are *VM
-//! primitives* (03 §11): still first-class procedure values, but called
-//! with the VM's context.
+//! compile, which needs the top-level environment, and `%frame-depth`
+//! looks at the VM. These are *VM primitives* (03 §11): still first-class
+//! procedure values, but called with the VM's context.
 //!
 //! ponytail: P1's arithmetic takes fixnums only (results may be bignums).
 //! P6 replaces it with s1's numeric tower.
@@ -22,15 +22,16 @@ use crate::globals::Env;
 use crate::heap::{Heap, Obj};
 use crate::printer::{display_value, print_value};
 use crate::value::Value;
+use crate::vm::Vm;
 
 pub type BuiltinFn = fn(&mut Heap, &[Value]) -> Result<Value, String>;
 
-/// A VM primitive's code: it also gets the environment the running code
-/// belongs to.
+/// A VM primitive's code: it also gets the VM and the environment the
+/// running code belongs to.
 // ponytail: returns a value, which is all `dis` needs. P7 changes this to
 // return an `Action` (03 §11), so `eval` can tail-call the code it compiles
 // and `%call/cc` can resume a continuation.
-pub type VmFn = fn(&mut Heap, &mut Env, &[Value]) -> Result<Value, String>;
+pub type VmFn = fn(&mut Vm, &mut Heap, &mut Env, &[Value]) -> Result<Value, String>;
 
 pub enum PrimFn {
     Builtin(BuiltinFn),
@@ -67,6 +68,8 @@ static PRIMITIVES: &[Primitive] = &[
     prim("display", 1, Some(1), display),
     prim("newline", 0, Some(0), newline),
     vm_prim("dis", 1, Some(1), dis),
+    // Like s1's %kont-depth: for tests that tail calls don't grow the stack.
+    vm_prim("%frame-depth", 0, Some(0), |vm, _, _, _| Ok(Value::fixnum(vm.frame_depth() as i64).unwrap())),
 ];
 
 /// Define every builtin in `env`.
@@ -120,8 +123,12 @@ fn mul(heap: &mut Heap, args: &[Value]) -> Result<Value, String> {
 }
 
 fn compare(args: &[Value], who: &str, holds: fn(i64, i64) -> bool) -> Result<Value, String> {
-    let nums = args.iter().map(|&a| fixnum(a, who)).collect::<Result<Vec<_>, _>>()?;
-    Ok(Value::bool(nums.windows(2).all(|w| holds(w[0], w[1]))))
+    // Every argument is type-checked, even after the result is known.
+    let mut result = true;
+    for w in args.windows(2) {
+        result &= holds(fixnum(w[0], who)?, fixnum(w[1], who)?);
+    }
+    Ok(Value::bool(result))
 }
 
 fn pair(v: Value, who: &str) -> Result<(Value, Value), String> {
@@ -144,8 +151,8 @@ fn newline(_: &mut Heap, _: &[Value]) -> Result<Value, String> {
 
 /// `(dis datum)`: compile `datum` as a top-level form for the current
 /// environment and print its disassembly, without running it.
-fn dis(heap: &mut Heap, env: &mut Env, args: &[Value]) -> Result<Value, String> {
+fn dis(_: &mut Vm, heap: &mut Heap, env: &mut Env, args: &[Value]) -> Result<Value, String> {
     let template = compile::compile(heap, env, args[0])?;
-    print!("{}", compile::disasm::disassemble(&template));
+    print!("{}", compile::disasm::disassemble(template));
     Ok(Value::UNSPECIFIED)
 }

@@ -1,0 +1,26 @@
+template top-level
+   0  MakeClosure k0   ; #<template fib>
+   1  GlobalDefine k1  ; fib
+   2  Return
+template fib  arity 1
+   0  GlobalRef k0     ; <
+   1  LocalRef 0       ; n
+   2  Fixnum 2
+   3  Call 2
+   4  JumpIfFalse →7
+   5  LocalRef 0       ; n
+   6  Return
+   7  GlobalRef k1     ; +
+   8  GlobalRef k2     ; fib
+   9  GlobalRef k3     ; -
+  10  LocalRef 0       ; n
+  11  Fixnum 1
+  12  Call 2
+  13  Call 1
+  14  GlobalRef k2     ; fib
+  15  GlobalRef k3     ; -
+  16  LocalRef 0       ; n
+  17  Fixnum 2
+  18  Call 2
+  19  Call 1
+  20  TailCall 2

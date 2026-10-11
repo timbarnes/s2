@@ -2,7 +2,8 @@
 //!
 //! An instruction is a Rust enum value ("wordcode"), 8 bytes, dispatched by
 //! a `match`. Every expression's code leaves exactly one value on the
-//! stack, which is what makes code generation a simple recursive walk.
+//! stack, which is what makes code generation a simple recursive walk. The
+//! exceptions are `TailCall` and `Return`, which leave the current frame.
 
 use crate::value::Value;
 
@@ -16,6 +17,11 @@ pub enum Op {
     True,
     False,
     Unspecified,
+    /// Push local `i`: the value in stack slot `fp + i`. Parameters come
+    /// first, then `let` variables.
+    LocalRef(u16),
+    /// Push free variable `i` of the running closure.
+    FreeRef(u16),
     /// Push the value of the global whose binding cell is constant `k`.
     /// An error if it is unbound.
     GlobalRef(u32),
@@ -28,20 +34,44 @@ pub enum Op {
     JumpIfFalse(u32),
     /// Discard the top value.
     Pop,
+    /// Keep the top value, and discard the `n` values below it. Ends a
+    /// `let` that isn't in tail position, removing its variables.
+    Slide(u16),
+    /// Constant `k` is a template with `nfree` free variables, whose values
+    /// are on the stack. Replace them with a new closure.
+    MakeClosure(u32),
     /// The stack holds a procedure and `n` arguments above it. Call the
-    /// procedure, and replace all `n + 1` values with the result.
+    /// procedure; when it returns, all `n + 1` values have been replaced
+    /// with the result.
     Call(u16),
-    /// Pop a value and return it from the template.
+    /// A call in tail position: replace the current frame with the callee's,
+    /// so the callee returns directly to this procedure's caller.
+    TailCall(u16),
+    /// Pop a value and return it to the caller.
     Return,
 }
 
 const _: () = assert!(std::mem::size_of::<Op>() == 8);
 
-/// A unit of compiled code: P1 compiles each top-level form into one
-/// template, which the VM runs as a procedure of no arguments.
+/// Compiled code for one procedure: a `lambda`, or a top-level form (a
+/// procedure of no arguments).
 pub struct Template {
+    /// The procedure's name; empty for an anonymous `lambda`.
     pub name: Box<str>,
+    /// The number of required parameters.
+    pub required: u16,
+    /// Whether extra arguments are collected into a rest list, which becomes
+    /// local `required`.
+    pub rest: bool,
+    /// The number of free variables a closure of this template holds.
+    pub nfree: u16,
     pub code: Vec<Op>,
-    /// Constants: literals and binding cells, referred to by index.
+    /// Constants: literals, binding cells and the templates of inner
+    /// lambdas, referred to by index.
     pub consts: Vec<Value>,
+    /// Names for the disassembler: of each local slot (a slot reused by
+    /// sibling `let`s has several, joined by `/`), and of each free
+    /// variable.
+    pub local_names: Vec<String>,
+    pub free_names: Vec<String>,
 }

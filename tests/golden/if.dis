@@ -7,18 +7,17 @@ template top-level
    1  GlobalRef k1     ; x
    2  Fixnum 20
    3  Call 2
-   4  JumpIfFalse →10
+   4  JumpIfFalse →9
    5  GlobalRef k2     ; +
    6  GlobalRef k1     ; x
    7  Fixnum 1
-   8  Call 2
-   9  Jump →11
-  10  Fixnum 0
-  11  Return
+   8  TailCall 2
+   9  Fixnum 0
+  10  Return
 template top-level
    0  False
    1  JumpIfFalse →4
    2  False
-   3  Jump →5
+   3  Return
    4  Unspecified
    5  Return

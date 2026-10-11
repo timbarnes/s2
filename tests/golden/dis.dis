@@ -1,29 +1,25 @@
 template top-level
    0  GlobalRef k0     ; dis
    1  Const k1         ; (+ 2 3)
-   2  Call 1
-   3  Return
+   2  TailCall 1
 template top-level
    0  GlobalRef k0     ; +
    1  Fixnum 2
    2  Fixnum 3
-   3  Call 2
-   4  Return
+   3  TailCall 2
 template top-level
    0  GlobalRef k0     ; dis
    1  Const k1         ; (if (< x 20) (+ x 1) 0)
-   2  Call 1
-   3  Return
+   2  TailCall 1
 template top-level
    0  GlobalRef k0     ; <
    1  GlobalRef k1     ; x
    2  Fixnum 20
    3  Call 2
-   4  JumpIfFalse →10
+   4  JumpIfFalse →9
    5  GlobalRef k2     ; +
    6  GlobalRef k1     ; x
    7  Fixnum 1
-   8  Call 2
-   9  Jump →11
-  10  Fixnum 0
-  11  Return
+   8  TailCall 2
+   9  Fixnum 0
+  10  Return

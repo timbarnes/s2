@@ -20,6 +20,7 @@ use rustc_hash::FxHashMap;
 use crate::builtins::Primitive;
 use crate::sstring::SString;
 use crate::value::Value;
+use crate::vm::Template;
 
 /// A reference to a heap object. Compared and hashed by identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,6 +61,12 @@ pub enum Obj {
     Global { name: GcRef, value: Cell<Value> },
     /// A procedure written in Rust.
     Primitive(&'static Primitive),
+    /// Compiled code (`vm/op.rs`). Templates are heap objects so that a
+    /// template's constant pool can hold the templates of its inner lambdas.
+    Template(Template),
+    /// A procedure written in Scheme: a template plus the values of its free
+    /// variables, copied when the closure was made (a flat closure, D6).
+    Closure { template: GcRef, free: Box<[Value]> },
 }
 
 /// Owns every heap object.
@@ -133,6 +140,14 @@ impl Heap {
 
     pub fn primitive(&mut self, p: &'static Primitive) -> Value {
         self.alloc(Obj::Primitive(p))
+    }
+
+    pub fn template(&mut self, t: Template) -> GcRef {
+        self.alloc(Obj::Template(t)).as_ref().unwrap()
+    }
+
+    pub fn closure(&mut self, template: GcRef, free: Box<[Value]>) -> Value {
+        self.alloc(Obj::Closure { template, free })
     }
 
     /// The list of `items`.
