@@ -1,0 +1,79 @@
+template top-level
+   0  MakeClosure k0   ; #<template parity>
+   1  GlobalDefine k1  ; parity
+   2  Return
+template parity  arity 1
+   0  Undefined
+   1  Undefined
+   2  MakeBox 2        ; odd?
+   3  LocalRef 2       ; odd?
+   4  MakeClosure k0   ; #<template even?>
+   5  LocalSet 1       ; even?
+   6  LocalRef 2       ; odd?
+   7  LocalRef 1       ; even?
+   8  MakeClosure k1   ; #<template odd?>
+   9  BoxSet
+  10  LocalRef 1       ; even?
+  11  LocalRef 0       ; n
+  12  TailCall 1
+template even?  arity 1  free 1
+   0  GlobalRef k0     ; =
+   1  LocalRef 0       ; n
+   2  Fixnum 0
+   3  Call 2
+   4  JumpIfFalse →7
+   5  True
+   6  Return
+   7  FreeRef 0        ; odd?
+   8  BoxRef
+   9  GlobalRef k1     ; -
+  10  LocalRef 0       ; n
+  11  Fixnum 1
+  12  Call 2
+  13  TailCall 1
+template odd?  arity 1  free 1
+   0  GlobalRef k0     ; =
+   1  LocalRef 0       ; n
+   2  Fixnum 0
+   3  Call 2
+   4  JumpIfFalse →7
+   5  False
+   6  Return
+   7  FreeRef 0        ; even?
+   8  GlobalRef k1     ; -
+   9  LocalRef 0       ; n
+  10  Fixnum 1
+  11  Call 2
+  12  TailCall 1
+template top-level
+   0  MakeClosure k0   ; #<template count-to>
+   1  GlobalDefine k1  ; count-to
+   2  Return
+template count-to  arity 1
+   0  Undefined
+   1  MakeBox 1        ; loop
+   2  LocalRef 1       ; loop
+   3  LocalRef 0       ; n
+   4  LocalRef 1       ; loop
+   5  MakeClosure k0   ; #<template loop>
+   6  BoxSet
+   7  LocalRef 1       ; loop
+   8  BoxRef
+   9  Slide 1
+  10  Fixnum 0
+  11  TailCall 1
+template loop  arity 1  free 2
+   0  GlobalRef k0     ; =
+   1  LocalRef 0       ; i
+   2  FreeRef 0        ; n
+   3  Call 2
+   4  JumpIfFalse →7
+   5  LocalRef 0       ; i
+   6  Return
+   7  FreeRef 1        ; loop
+   8  BoxRef
+   9  GlobalRef k1     ; +
+  10  LocalRef 0       ; i
+  11  Fixnum 1
+  12  Call 2
+  13  TailCall 1

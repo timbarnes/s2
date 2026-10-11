@@ -1,7 +1,7 @@
 //! The core AST (D11, plan/03 §2): the language the compiler compiles.
 //!
-//! P2 adds local variables: `LocalRef`, `Lambda` and `Let`. `LocalSet` and
-//! `Letrec` arrive in P4.
+//! P2 added local variables: `LocalRef`, `Lambda` and `Let`. P4 adds
+//! assignment (`LocalSet`, `GlobalSet`) and `Letrec`.
 
 use crate::heap::GcRef;
 use crate::value::Value;
@@ -25,8 +25,12 @@ pub enum Expr {
     Const(Value),
     /// A local variable: a lambda parameter or a `let` variable.
     LocalRef(VarId),
+    /// `(set! v expr)` on a local variable.
+    LocalSet(VarId, Box<Expr>),
     /// A global variable, already resolved to its binding cell.
     GlobalRef(GcRef),
+    /// `(set! v expr)` on a global variable. An error if it is unbound.
+    GlobalSet(GcRef, Box<Expr>),
     /// A top-level `(define name expr)`.
     GlobalDefine(GcRef, Box<Expr>),
     /// `(if test then else)`. A missing else is `Const(UNSPECIFIED)`.
@@ -40,6 +44,11 @@ pub enum Expr {
     /// `((lambda (v ...) body) init ...)`, but compiled without making a
     /// closure: the variables are stack slots in the current frame.
     Let(Vec<(Var, Expr)>, Box<Expr>),
+    /// `(letrec* ((v init) ...) body)`: the variables are in scope in the
+    /// inits too. Each starts out undefined, and the inits are evaluated
+    /// and assigned in order. `letrec`, internal `define`s and named `let`
+    /// all become this.
+    Letrec(Vec<(Var, Expr)>, Box<Expr>),
 }
 
 #[derive(Debug)]

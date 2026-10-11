@@ -1,0 +1,52 @@
+template top-level
+   0  MakeClosure k0   ; #<template make-counter>
+   1  GlobalDefine k1  ; make-counter
+   2  Return
+template make-counter  arity 0
+   0  Fixnum 0
+   1  MakeBox 0        ; n
+   2  LocalRef 0       ; n
+   3  MakeClosure k0   ; #<template>
+   4  Return
+template (lambda)  arity 0  free 1
+   0  FreeRef 0        ; n
+   1  GlobalRef k0     ; +
+   2  FreeRef 0        ; n
+   3  BoxRef
+   4  Fixnum 1
+   5  Call 2
+   6  BoxSet
+   7  Unspecified
+   8  Pop
+   9  FreeRef 0        ; n
+  10  BoxRef
+  11  Return
+template top-level
+   0  MakeClosure k0   ; #<template f>
+   1  GlobalDefine k1  ; f
+   2  Return
+template f  arity 2
+   0  GlobalRef k0     ; +
+   1  LocalRef 0       ; x
+   2  Fixnum 1
+   3  Call 2
+   4  LocalSet 0       ; x
+   5  Unspecified
+   6  Pop
+   7  GlobalRef k1     ; cons
+   8  LocalRef 0       ; x
+   9  LocalRef 1       ; y
+  10  MakeClosure k2   ; #<template>
+  11  TailCall 2
+template (lambda)  arity 0  free 1
+   0  FreeRef 0        ; y
+   1  Return
+template top-level
+   0  Fixnum 0
+   1  GlobalDefine k0  ; g
+   2  Return
+template top-level
+   0  Fixnum 1
+   1  GlobalSet k0     ; g
+   2  Unspecified
+   3  Return

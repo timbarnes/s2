@@ -17,14 +17,30 @@ pub enum Op {
     True,
     False,
     Unspecified,
+    /// Push the undefined value: the contents of a `letrec` variable before
+    /// its init has run.
+    Undefined,
     /// Push local `i`: the value in stack slot `fp + i`. Parameters come
     /// first, then `let` variables.
     LocalRef(u16),
+    /// Pop a value into local `i`.
+    LocalSet(u16),
     /// Push free variable `i` of the running closure.
     FreeRef(u16),
+    /// Replace the value in local `i` with a new box holding it. Done once,
+    /// where a boxed variable is bound (03 §7).
+    MakeBox(u16),
+    /// Pop a box and push its contents. An error if the box is still
+    /// undefined: a `letrec` variable used before its init has run.
+    BoxRef,
+    /// Pop a value, then a box, and put the value in the box.
+    BoxSet,
     /// Push the value of the global whose binding cell is constant `k`.
     /// An error if it is unbound.
     GlobalRef(u32),
+    /// Pop a value into the binding cell `k` (`set!`). An error if the
+    /// variable is unbound.
+    GlobalSet(u32),
     /// Pop a value into the binding cell `k`, and push the variable's name
     /// (the value of a `define`, as in s1).
     GlobalDefine(u32),

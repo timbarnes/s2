@@ -13,10 +13,14 @@
 //!   value. A call in tail position becomes `TailCall`; any other
 //!   expression in tail position is followed by `Return`. `if`, `begin` and
 //!   `let` pass `tail` on to their last subexpressions (R7RS §3.5).
+//!
+//! A variable in `boxed` (`analyze::boxed_variables`) holds a box: `MakeBox`
+//! where it is bound, `BoxRef` after each load, `BoxSet` to assign. A
+//! closure capturing it copies the box itself.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::compile::analyze::free_variables;
+use crate::compile::analyze::{boxed_variables, free_variables};
 use crate::compile::ast::{Expr, Lambda, Var, VarId};
 use crate::heap::{GcRef, Heap};
 use crate::printer::print_value;
@@ -25,7 +29,8 @@ use crate::vm::{Op, Template};
 
 /// Compile a top-level form into a template of no arguments.
 pub fn codegen(heap: &mut Heap, e: &Expr) -> GcRef {
-    let mut g = Gen::new(heap);
+    let boxed = boxed_variables(e);
+    let mut g = Gen::new(heap, &boxed);
     g.expr(e, true);
     g.finish("top-level", 0, false)
 }
@@ -42,6 +47,7 @@ enum Loc {
 
 struct Gen<'h> {
     heap: &'h mut Heap,
+    boxed: &'h FxHashSet<VarId>,
     code: Vec<Op>,
     consts: Vec<Value>,
     depth: usize,
@@ -52,9 +58,10 @@ struct Gen<'h> {
 }
 
 impl<'h> Gen<'h> {
-    fn new(heap: &'h mut Heap) -> Gen<'h> {
+    fn new(heap: &'h mut Heap, boxed: &'h FxHashSet<VarId>) -> Gen<'h> {
         Gen {
             heap,
+            boxed,
             code: Vec::new(),
             consts: Vec::new(),
             depth: 0,
@@ -128,11 +135,52 @@ impl<'h> Gen<'h> {
 
     /// Push the value of local variable `id`.
     fn load(&mut self, id: VarId) {
+        self.load_raw(id);
+        if self.boxed.contains(&id) {
+            self.emit(Op::BoxRef);
+        }
+    }
+
+    /// Push what local variable `id`'s slot holds: its box, if it has one.
+    fn load_raw(&mut self, id: VarId) {
         match self.locs[&id] {
             Loc::Local(i) => self.emit(Op::LocalRef(i)),
             Loc::Free(i) => self.emit(Op::FreeRef(i)),
         };
         self.depth += 1;
+    }
+
+    /// Box local variable `var`, bound in slot `slot`, if it needs a box.
+    fn box_if_needed(&mut self, var: Var, slot: usize) {
+        if self.boxed.contains(&var.id) {
+            self.emit(Op::MakeBox(slot as u16));
+        }
+    }
+
+    /// Assign the value of `value` to local variable `id`, leaving nothing
+    /// on the stack.
+    fn assign(&mut self, id: VarId, value: &Expr) {
+        if self.boxed.contains(&id) {
+            self.load_raw(id);
+            self.expr(value, false);
+            self.emit(Op::BoxSet);
+            self.depth -= 2;
+        } else {
+            self.expr(value, false);
+            match self.locs[&id] {
+                Loc::Local(i) => self.emit(Op::LocalSet(i)),
+                // Captured and assigned means boxed.
+                Loc::Free(_) => unreachable!("assignment to an unboxed free variable"),
+            };
+            self.depth -= 1;
+        }
+    }
+
+    /// Push the unspecified value, the result of an assignment.
+    fn unspecified(&mut self, tail: bool) {
+        self.emit(Op::Unspecified);
+        self.depth += 1;
+        self.ret(tail);
     }
 
     fn expr(&mut self, e: &Expr, tail: bool) {
@@ -145,6 +193,17 @@ impl<'h> Gen<'h> {
             Expr::LocalRef(id) => {
                 self.load(*id);
                 self.ret(tail);
+            }
+            Expr::LocalSet(id, value) => {
+                self.assign(*id, value);
+                self.unspecified(tail);
+            }
+            Expr::GlobalSet(cell, value) => {
+                self.expr(value, false);
+                let k = self.constant(Value::obj(*cell));
+                self.emit(Op::GlobalSet(k));
+                self.depth -= 1;
+                self.unspecified(tail);
             }
             Expr::GlobalRef(cell) => {
                 let k = self.constant(Value::obj(*cell));
@@ -188,7 +247,7 @@ impl<'h> Gen<'h> {
             Expr::Lambda(l) => {
                 let free = free_variables(l);
                 for &id in &free {
-                    self.load(id);
+                    self.load_raw(id);
                 }
                 let t = self.lambda(l, &free);
                 let k = self.constant(Value::obj(t));
@@ -212,22 +271,46 @@ impl<'h> Gen<'h> {
                 }
                 for (i, (var, _)) in bindings.iter().enumerate() {
                     self.bind_local(*var, base + i);
+                    self.box_if_needed(*var, base + i);
                 }
-                self.expr(body, tail);
-                if !tail && !bindings.is_empty() {
-                    self.emit(Op::Slide(bindings.len() as u16));
-                    self.depth -= bindings.len();
-                }
+                self.end_scope(body, tail, bindings.len());
             }
+            Expr::Letrec(bindings, body) => {
+                // Every variable gets its slot (and box) first, undefined,
+                // so the inits can capture them. Then each init is
+                // evaluated and assigned in order (letrec*).
+                let base = self.depth;
+                for (i, (var, _)) in bindings.iter().enumerate() {
+                    self.emit(Op::Undefined);
+                    self.depth += 1;
+                    self.bind_local(*var, base + i);
+                    self.box_if_needed(*var, base + i);
+                }
+                for (var, init) in bindings {
+                    self.assign(var.id, init);
+                }
+                self.end_scope(body, tail, bindings.len());
+            }
+        }
+    }
+
+    /// Compile the body of a `let` or `letrec` whose `n` variables are the
+    /// top `n` slots, then drop them unless the frame is ending anyway.
+    fn end_scope(&mut self, body: &Expr, tail: bool, n: usize) {
+        self.expr(body, tail);
+        if !tail && n > 0 {
+            self.emit(Op::Slide(n as u16));
+            self.depth -= n;
         }
     }
 
     /// Compile an inner lambda into its own template. `free` lists its free
     /// variables; inside it they are `FreeRef 0`, `FreeRef 1`, ….
     fn lambda(&mut self, l: &Lambda, free: &[VarId]) -> GcRef {
-        let mut g = Gen::new(self.heap);
+        let mut g = Gen::new(self.heap, self.boxed);
         for (i, p) in l.params.iter().chain(&l.rest).enumerate() {
             g.bind_local(*p, i);
+            g.box_if_needed(*p, i);
         }
         for (i, id) in free.iter().enumerate() {
             let name = self.names[id].clone();

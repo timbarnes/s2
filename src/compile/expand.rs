@@ -1,14 +1,16 @@
 //! A minimal, hard-coded "expander": datum to core AST.
 //!
-//! It recognises `quote`, `if`, `define`, `begin`, `lambda` and `let` by
-//! name, and treats any other list as a call. A symbol is a local variable
+//! It recognises `quote`, `if`, `define`, `set!`, `begin`, `lambda`, `let`
+//! (and named `let`), `letrec` and `letrec*` by name, and treats any other
+//! list as a call. A symbol is a local variable
 //! if a `lambda` or `let` around it binds it, and a global otherwise. Each
 //! local binding gets a fresh `VarId`, so the passes after this one never
 //! see names.
 //!
 //! ponytail: no macros and no hygiene. A local variable named like a keyword
 //! does shadow it, but a global can't. The real expander, with a syntactic
-//! environment, is P5. Internal `define` comes in P4, with `letrec*`.
+//! environment, is P5, and with it the full R7RS body rules (here, a body's
+//! definitions must come first and can't come from a `begin`).
 
 use crate::compile::ast::{Expr, Lambda, Var, VarId};
 use crate::globals::Env;
@@ -29,6 +31,13 @@ struct Expander<'a> {
     next_id: VarId,
 }
 
+/// The value of a `define`, before expansion: `(define (name . formals)
+/// body ...)` or `(define name expr)`.
+enum Definition {
+    Procedure(Value, Vec<Value>),
+    Expr(Value),
+}
+
 fn symbol(v: Value) -> Option<GcRef> {
     matches!(v.as_obj().map(|o| &o.kind), Some(Obj::Symbol(_))).then(|| v.as_ref().unwrap())
 }
@@ -43,8 +52,25 @@ impl Expander<'_> {
         Var { id: self.next_id, name: Value::obj(name) }
     }
 
-    /// `top` is true for a top-level form, or a `begin` at top level: the
-    /// only places `define` is allowed until P4.
+    /// The keyword `head` names, or "" if it isn't a symbol or is a local
+    /// variable (which shadows any keyword).
+    fn keyword<'b>(&self, head: Value) -> &'b str {
+        match symbol(head) {
+            Some(s) if self.local(s).is_none() => match &s.get().kind {
+                Obj::Symbol(name) => name,
+                _ => unreachable!(),
+            },
+            _ => "",
+        }
+    }
+
+    /// Whether `x` is a `(define ...)` form.
+    fn is_definition(&self, x: Value) -> bool {
+        matches!(x.as_obj().map(|o| &o.kind), Some(Obj::Pair { car, .. }) if self.keyword(car.get()) == "define")
+    }
+
+    /// `top` is true for a top-level form, or a `begin` at top level, where
+    /// `define` defines a global.
     fn expr(&mut self, x: Value, top: bool) -> Result<Expr, String> {
         let Some(obj) = x.as_ref() else {
             return if x.is_nil() { Err("empty combination: ()".into()) } else { Ok(Expr::Const(x)) };
@@ -56,22 +82,17 @@ impl Expander<'_> {
             }),
             Obj::Pair { car, .. } => {
                 let items = list_to_vec(x).ok_or_else(|| format!("improper list in code: {}", print_value(x)))?;
-                let keyword = match symbol(car.get()) {
-                    Some(s) if self.local(s).is_none() => match &s.get().kind {
-                        Obj::Symbol(name) => &**name,
-                        _ => unreachable!(),
-                    },
-                    _ => "",
-                };
-                match keyword {
+                match self.keyword(car.get()) {
                     "quote" => self.quote(&items),
                     "if" => self.if_(&items),
                     "define" if top => self.define(&items),
-                    "define" => Err(format!("define: only allowed at top level: {}", print_value(x))),
+                    "define" => Err(format!("define: only allowed at top level or at the start of a body: {}", print_value(x))),
+                    "set!" => self.set(&items),
                     "begin" => self.begin(&items, top),
                     "lambda" if items.len() >= 3 => self.lambda("", items[1], &items[2..]),
                     "lambda" => Err(syntax_error("lambda", &items)),
                     "let" => self.let_(&items),
+                    "letrec" | "letrec*" => self.letrec(&items),
                     _ => self.call(&items),
                 }
             }
@@ -100,25 +121,41 @@ impl Expander<'_> {
         Ok(Expr::If(Box::new(self.expr(*test, false)?), Box::new(self.expr(*then, false)?), Box::new(els)))
     }
 
-    /// `(define name expr)` or `(define (name . formals) body ...)`.
+    /// A top-level `(define name expr)` or `(define (name . formals) body
+    /// ...)`.
     fn define(&mut self, items: &[Value]) -> Result<Expr, String> {
-        if let [_, target, ..] = items
-            && let Some(Obj::Pair { car, cdr }) = target.as_obj().map(|o| &o.kind)
-            && let Some(name) = symbol(car.get())
-            && items.len() >= 3
-        {
-            let lambda = self.lambda(&print_value(Value::obj(name)), cdr.get(), &items[2..])?;
-            return Ok(Expr::GlobalDefine(self.env.cell(self.heap, name), Box::new(lambda)));
-        }
-        let [_, name, value] = items else { return Err(syntax_error("define", items)) };
-        let Some(name) = symbol(*name) else { return Err(syntax_error("define", items)) };
-        let mut value = self.expr(*value, false)?;
-        if let Expr::Lambda(l) = &mut value
-            && l.name.is_empty()
-        {
-            l.name = print_value(Value::obj(name)).into();
-        }
+        let (name, def) = definition(items)?;
+        let value = self.definition_value(name, def)?;
         Ok(Expr::GlobalDefine(self.env.cell(self.heap, name), Box::new(value)))
+    }
+
+    /// Expand the value of a definition of `name`. A procedure gets `name`
+    /// as its name.
+    fn definition_value(&mut self, name: GcRef, def: Definition) -> Result<Expr, String> {
+        let name_text = print_value(Value::obj(name));
+        match def {
+            Definition::Procedure(formals, body) => self.lambda(&name_text, formals, &body),
+            Definition::Expr(x) => {
+                let mut value = self.expr(x, false)?;
+                if let Expr::Lambda(l) = &mut value
+                    && l.name.is_empty()
+                {
+                    l.name = name_text.into();
+                }
+                Ok(value)
+            }
+        }
+    }
+
+    /// `(set! name expr)`.
+    fn set(&mut self, items: &[Value]) -> Result<Expr, String> {
+        let [_, name, value] = items else { return Err(syntax_error("set!", items)) };
+        let Some(name) = symbol(*name) else { return Err(syntax_error("set!", items)) };
+        let value = Box::new(self.expr(*value, false)?);
+        Ok(match self.local(name) {
+            Some(id) => Expr::LocalSet(id, value),
+            None => Expr::GlobalSet(self.env.cell(self.heap, name), value),
+        })
     }
 
     fn begin(&mut self, items: &[Value], top: bool) -> Result<Expr, String> {
@@ -127,17 +164,47 @@ impl Expander<'_> {
             // unspecified.
             return Ok(Expr::Const(Value::UNSPECIFIED));
         }
-        self.body(&items[1..], top).map_err(|_| "begin: empty in an expression".into())
+        self.sequence(&items[1..], top).map_err(|_| "begin: empty in an expression".into())
     }
 
     /// A sequence of expressions: one expression, or a `Seq`.
-    fn body(&mut self, forms: &[Value], top: bool) -> Result<Expr, String> {
+    fn sequence(&mut self, forms: &[Value], top: bool) -> Result<Expr, String> {
         let mut body = forms.iter().map(|&x| self.expr(x, top)).collect::<Result<Vec<_>, _>>()?;
         match body.len() {
             0 => Err("empty body".into()),
             1 => Ok(body.pop().unwrap()),
             _ => Ok(Expr::Seq(body)),
         }
+    }
+
+    /// The body of a `lambda`, `let` or `letrec`: definitions, then at least
+    /// one expression. The definitions become a `Letrec` around the
+    /// expressions (R7RS §5.3.2: internal definitions are `letrec*`).
+    fn body(&mut self, forms: &[Value]) -> Result<Expr, String> {
+        let n = forms.iter().take_while(|&&f| self.is_definition(f)).count();
+        let (defs, exprs) = forms.split_at(n);
+        if defs.is_empty() {
+            return self.sequence(exprs, false);
+        }
+        if exprs.is_empty() {
+            return Err("body: no expression after the definitions".into());
+        }
+        let mut parsed: Vec<(GcRef, Definition)> = Vec::new();
+        for &d in defs {
+            let (name, def) = definition(&list_to_vec(d).unwrap())?;
+            if parsed.iter().any(|(n, _)| *n == name) {
+                return Err(format!("define: duplicate definition: {}", print_value(Value::obj(name))));
+            }
+            parsed.push((name, def));
+        }
+        let vars: Vec<Var> = parsed.iter().map(|(name, _)| self.fresh(*name)).collect();
+        self.scoped(&vars, |e| {
+            let mut bindings = Vec::new();
+            for ((name, def), var) in parsed.into_iter().zip(&vars) {
+                bindings.push((*var, e.definition_value(name, def)?));
+            }
+            Ok(Expr::Letrec(bindings, Box::new(e.sequence(exprs, false)?)))
+        })
     }
 
     /// `(lambda formals body ...)`. `formals` is a list of symbols, possibly
@@ -161,37 +228,87 @@ impl Expander<'_> {
                 return Err(format!("lambda: duplicate parameter: {}", print_value(v.name)));
             }
         }
-        let body = self.scoped(&all, |e| e.body(body, false))?;
+        let body = self.scoped(&all, |e| e.body(body))?;
         Ok(Expr::Lambda(Box::new(Lambda { name: name.into(), params, rest, body })))
     }
 
-    /// `(let ((v init) ...) body ...)`.
+    /// `(let ((v init) ...) body ...)`, or a named let.
     fn let_(&mut self, items: &[Value]) -> Result<Expr, String> {
         if items.len() < 3 {
             return Err(syntax_error("let", items));
         }
-        if symbol(items[1]).is_some() {
-            return Err("named let: not supported yet (P4)".into());
+        if let Some(name) = symbol(items[1]) {
+            return self.named_let(name, items);
         }
-        let specs = list_to_vec(items[1]).ok_or_else(|| syntax_error("let", items))?;
+        let specs = self.bindings(items[1], "let")?;
         let mut bindings = Vec::new();
+        for (name, init) in specs {
+            // The inits are expanded outside the new scope.
+            let init = self.expr(init, false)?;
+            bindings.push((self.fresh(name), init));
+        }
+        let vars: Vec<Var> = bindings.iter().map(|(v, _)| *v).collect();
+        let body = self.scoped(&vars, |e| e.body(&items[2..]))?;
+        Ok(Expr::Let(bindings, Box::new(body)))
+    }
+
+    /// `(let name ((v init) ...) body ...)` is
+    /// `((letrec ((name (lambda (v ...) body ...))) name) init ...)`.
+    fn named_let(&mut self, name: GcRef, items: &[Value]) -> Result<Expr, String> {
+        if items.len() < 4 {
+            return Err(syntax_error("let", items));
+        }
+        let specs = self.bindings(items[2], "let")?;
+        let mut inits = Vec::new();
+        for &(_, init) in &specs {
+            inits.push(self.expr(init, false)?);
+        }
+        let formals = self.heap.list(specs.iter().map(|&(v, _)| Value::obj(v)).collect());
+        let var = self.fresh(name);
+        let proc = self.scoped(&[var], |e| {
+            let lambda = e.lambda(&print_value(Value::obj(name)), formals, &items[3..])?;
+            Ok(Expr::Letrec(vec![(var, lambda)], Box::new(Expr::LocalRef(var.id))))
+        })?;
+        Ok(Expr::Call(Box::new(proc), inits))
+    }
+
+    /// `(letrec* ((v init) ...) body ...)`, and `letrec`, which is
+    /// allowed to be the same: R7RS only says what `letrec` does when no
+    /// init refers to another variable's value, and then the two agree.
+    fn letrec(&mut self, items: &[Value]) -> Result<Expr, String> {
+        let who = self.keyword(items[0]);
+        if items.len() < 3 {
+            return Err(syntax_error(who, items));
+        }
+        let specs = self.bindings(items[1], who)?;
+        let vars: Vec<Var> = specs.iter().map(|&(name, _)| self.fresh(name)).collect();
+        self.scoped(&vars, |e| {
+            let mut bindings = Vec::new();
+            for (&(name, init), var) in specs.iter().zip(&vars) {
+                bindings.push((*var, e.definition_value(name, Definition::Expr(init))?));
+            }
+            Ok(Expr::Letrec(bindings, Box::new(e.body(&items[2..])?)))
+        })
+    }
+
+    /// The `((v init) ...)` of a `let` or `letrec`: each variable and its
+    /// unexpanded init.
+    fn bindings(&self, specs: Value, who: &str) -> Result<Vec<(GcRef, Value)>, String> {
+        let specs = list_to_vec(specs).ok_or_else(|| format!("{}: bad bindings: {}", who, print_value(specs)))?;
+        let mut out: Vec<(GcRef, Value)> = Vec::new();
         for spec in specs {
             match list_to_vec(spec).as_deref() {
                 Some(&[name, init]) if symbol(name).is_some() => {
-                    // The inits are expanded outside the new scope.
-                    let init = self.expr(init, false)?;
-                    let var = self.fresh(symbol(name).unwrap());
-                    if bindings.iter().any(|(w, _): &(Var, Expr)| w.name.eq(var.name)) {
-                        return Err(format!("let: duplicate variable: {}", print_value(name)));
+                    let name = symbol(name).unwrap();
+                    if out.iter().any(|&(n, _)| n == name) {
+                        return Err(format!("{}: duplicate variable: {}", who, print_value(Value::obj(name))));
                     }
-                    bindings.push((var, init));
+                    out.push((name, init));
                 }
-                _ => return Err(format!("let: bad binding: {}", print_value(spec))),
+                _ => return Err(format!("{}: bad binding: {}", who, print_value(spec))),
             }
         }
-        let vars: Vec<Var> = bindings.iter().map(|(v, _)| *v).collect();
-        let body = self.scoped(&vars, |e| e.body(&items[2..], false))?;
-        Ok(Expr::Let(bindings, Box::new(body)))
+        Ok(out)
     }
 
     /// Run `f` with `vars` in scope.
@@ -207,6 +324,21 @@ impl Expander<'_> {
         let f = self.expr(items[0], false)?;
         let args = items[1..].iter().map(|&x| self.expr(x, false)).collect::<Result<Vec<_>, _>>()?;
         Ok(Expr::Call(Box::new(f), args))
+    }
+}
+
+/// Split a `define` form into the name and the unexpanded value.
+fn definition(items: &[Value]) -> Result<(GcRef, Definition), String> {
+    if let [_, target, body @ ..] = items
+        && let Some(Obj::Pair { car, cdr }) = target.as_obj().map(|o| &o.kind)
+        && let Some(name) = symbol(car.get())
+        && !body.is_empty()
+    {
+        return Ok((name, Definition::Procedure(cdr.get(), body.to_vec())));
+    }
+    match items {
+        [_, name, value] if symbol(*name).is_some() => Ok((symbol(*name).unwrap(), Definition::Expr(*value))),
+        _ => Err(syntax_error("define", items)),
     }
 }
 

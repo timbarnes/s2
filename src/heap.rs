@@ -72,6 +72,10 @@ pub enum Obj {
     /// A top-level binding cell (D7): a global variable. Holds
     /// `Value::UNDEFINED` until the variable is defined.
     Global { name: GcRef, value: Cell<Value> },
+    /// A variable that is both captured and assigned, or used before its
+    /// `letrec` init has run (03 §7, `analyze::boxed_variables`). Closures
+    /// copy the box, so they share the variable. Never seen by Scheme code.
+    Box(Cell<Value>),
     /// A procedure written in Rust.
     Primitive(&'static Primitive),
     /// Compiled code (`vm/op.rs`). Templates are heap objects so that a
@@ -239,6 +243,10 @@ impl Heap {
         self.alloc(Obj::Template(t)).as_ref().unwrap()
     }
 
+    pub fn make_box(&mut self, v: Value) -> Value {
+        self.alloc(Obj::Box(Cell::new(v)))
+    }
+
     pub fn closure(&mut self, template: GcRef, free: Box<[Value]>) -> Value {
         self.alloc(Obj::Closure { template, free })
     }
@@ -283,6 +291,7 @@ impl Marker {
                     self.value(cdr.get());
                 }
                 Obj::Vector(items) => items.iter().for_each(|c| self.value(c.get())),
+                Obj::Box(value) => self.value(value.get()),
                 Obj::Global { name, value } => {
                     self.obj(*name);
                     self.value(value.get());

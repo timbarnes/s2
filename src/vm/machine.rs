@@ -55,6 +55,25 @@ fn template_of<'a>(t: GcRef) -> &'a Template {
     }
 }
 
+fn box_contents<'a>(b: Value) -> &'a std::cell::Cell<Value> {
+    match b.as_obj().map(|o| &o.kind) {
+        Some(Obj::Box(v)) => v,
+        _ => unreachable!("not a box"),
+    }
+}
+
+/// The name of the variable whose box the `BoxRef` just executed (at
+/// `ip - 1`) found undefined. Codegen always emits `BoxRef` straight after
+/// the `LocalRef` or `FreeRef` that loads the box, so the name is that
+/// instruction's.
+fn boxed_name(t: &Template, ip: usize) -> &str {
+    match t.code[ip - 2] {
+        Op::LocalRef(i) => &t.local_names[i as usize],
+        Op::FreeRef(i) => &t.free_names[i as usize],
+        _ => unreachable!("BoxRef not after a load"),
+    }
+}
+
 impl Vm {
     /// The number of frames waiting for a callee to return.
     pub fn frame_depth(&self) -> usize {
@@ -118,8 +137,25 @@ impl Vm {
                 Op::True => self.stack.push(Value::TRUE),
                 Op::False => self.stack.push(Value::FALSE),
                 Op::Unspecified => self.stack.push(Value::UNSPECIFIED),
+                Op::Undefined => self.stack.push(Value::UNDEFINED),
                 Op::LocalRef(i) => self.stack.push(self.stack[fp + i as usize]),
+                Op::LocalSet(i) => self.stack[fp + i as usize] = self.stack.pop().unwrap(),
                 Op::FreeRef(i) => self.stack.push(free[i as usize]),
+                Op::MakeBox(i) => {
+                    let slot = fp + i as usize;
+                    self.stack[slot] = heap.make_box(self.stack[slot]);
+                }
+                Op::BoxRef => {
+                    let v = box_contents(self.stack.pop().unwrap()).get();
+                    if v.is_undefined() {
+                        return Err(format!("variable used before its initialisation: {}", boxed_name(t, ip)));
+                    }
+                    self.stack.push(v);
+                }
+                Op::BoxSet => {
+                    let v = self.stack.pop().unwrap();
+                    box_contents(self.stack.pop().unwrap()).set(v);
+                }
                 Op::GlobalRef(k) => {
                     let cell = t.consts[k as usize].as_ref().unwrap();
                     let v = cell_value(cell).get();
@@ -127,6 +163,13 @@ impl Vm {
                         return Err(format!("unbound variable: {}", print_value(cell_name(cell))));
                     }
                     self.stack.push(v);
+                }
+                Op::GlobalSet(k) => {
+                    let cell = t.consts[k as usize].as_ref().unwrap();
+                    if cell_value(cell).get().is_undefined() {
+                        return Err(format!("set!: unbound variable: {}", print_value(cell_name(cell))));
+                    }
+                    cell_value(cell).set(self.stack.pop().unwrap());
                 }
                 Op::GlobalDefine(k) => {
                     let cell = t.consts[k as usize].as_ref().unwrap();

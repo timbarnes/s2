@@ -246,6 +246,63 @@ mod tests {
     }
 
     #[test]
+    fn assignment() {
+        // Globals; set! returns nothing printable.
+        check("(define g 1) (set! g (+ g 1)) g (set! nope 1)", &["g", "", "2", "error: set!: unbound variable: nope"]);
+        // A parameter assigned but not captured stays in its slot.
+        check("(define (f x) (set! x (+ x 1)) (* x 10)) (f 1)", &["f", "20"]);
+        // A counter: each closure has its own boxed variable.
+        check("(define (make-counter) (let ((n 0)) (lambda () (set! n (+ n 1)) n)))
+               (define c (make-counter)) (define d (make-counter)) (c) (c) (d) (c)",
+              &["make-counter", "c", "d", "1", "2", "1", "3"]);
+        // Two closures share one variable; so does the procedure that made them.
+        check("(define (cell v) (let ((get (lambda () v)) (put (lambda (x) (set! v x)))) (put (+ v 1)) (cons get put)))
+               (define p (cell 1)) ((car p)) ((cdr p) 42) ((car p))",
+              &["cell", "p", "2", "", "42"]);
+        // A captured parameter that is assigned is boxed at entry.
+        check("(define (acc total) (lambda (x) (set! total (+ total x)) total)) (define a (acc 100)) (a 10) (a 10)",
+              &["acc", "a", "110", "120"]);
+        check("(set! 1 2)", &["error: set!: bad syntax: (set! 1 2)"]);
+    }
+
+    #[test]
+    fn letrec_and_internal_definitions() {
+        check("(define (parity n)
+                 (define (even? n) (if (= n 0) #t (odd? (- n 1))))
+                 (define (odd? n) (if (= n 0) #f (even? (- n 1))))
+                 (cons (even? n) (odd? n)))
+               (parity 7) (parity 10000)",
+              &["parity", "(#f . #t)", "(#t . #f)"]);
+        check("(letrec ((fact (lambda (n) (if (= n 0) 1 (* n (fact (- n 1))))))) (fact 20))", &["2432902008176640000"]);
+        // letrec*: each init sees the earlier variables.
+        check("(letrec* ((a 1) (b (+ a 1))) (cons a b))", &["(1 . 2)"]);
+        check("(define (f) (define a 1) (define b (+ a 1)) (define (g) (* a b)) (g)) (f)", &["f", "2"]);
+        // A reference before the init has run is an error, even through a lambda.
+        check("(letrec ((a b) (b 1)) a)", &["error: variable used before its initialisation: b"]);
+        check("(letrec ((a (lambda () b)) (b (a))) b)", &["error: variable used before its initialisation: b"]);
+        // A procedure defined internally is named after its definition.
+        check("(define (f) (define (inner) 1) inner) (f)", &["f", "#<procedure inner>"]);
+        // Shadowing a global with an internal definition.
+        check("(define x 'global) (define (f) (define x 'local) x) (f) x", &["x", "f", "local", "global"]);
+        check("(define (f) (define a 1) (display a) (define b 2) b)",
+              &["error: define: only allowed at top level or at the start of a body: (define b 2)"]);
+        check("(define (f) (define a 1))", &["error: body: no expression after the definitions"]);
+        check("(define (f) (define a 1) (define a 2) a)", &["error: define: duplicate definition: a"]);
+        check("(letrec ((a 1) (a 2)) a) (letrec ((a)) a)",
+              &["error: letrec: duplicate variable: a", "error: letrec: bad binding: (a)"]);
+    }
+
+    #[test]
+    fn named_let() {
+        check("(let loop ((i 0) (acc '())) (if (= i 5) acc (loop (+ i 1) (cons i acc))))", &["(4 3 2 1 0)"]);
+        // The inits are outside the loop's scope; the name is visible in the body.
+        check("(define i 10) (let loop ((i i)) (if (= i 0) loop (loop (- i 1))))", &["i", "#<procedure loop>"]);
+        check("(let loop ((i 0)) (if (= i 10000) (%frame-depth) (loop (+ i 1))))", &["0"]);
+        check("(let loop) (let loop ((x 1) (x 2)) x)",
+              &["error: let: bad syntax: (let loop)", "error: let: duplicate variable: x"]);
+    }
+
+    #[test]
     fn tail_calls_run_in_constant_space() {
         let mut s = Session::new(false);
         let mut port = io::new_string_port_input(
@@ -317,6 +374,11 @@ mod tests {
             ("begin", "(begin 1 (loop (- n 1)))"),
             ("lambda body", "((lambda () (loop (- n 1))))"),
             ("lambda body, last of several", "((lambda () 1 (loop (- n 1))))"),
+            ("letrec", "(letrec ((m (- n 1))) (loop m))"),
+            ("letrec*", "(letrec* ((m (- n 1))) (loop m))"),
+            ("named let", "(let l ((m (- n 1))) (loop m))"),
+            ("internal definitions", "((lambda () (define m (- n 1)) (loop m)))"),
+            ("set! then call", "((lambda (m) (set! m (- m 1)) (loop m)) n)"),
         ] {
             let src = format!("(define (loop n) (if (= n 0) (%frame-depth) {})) (= (loop 5) (loop 500))", step);
             assert_eq!(run(&src), ["loop", "#t"], "{}", name);
@@ -335,7 +397,7 @@ mod tests {
         check("(+ 1 \"a\")", &["error: +: not a fixnum: \"a\""]);
         check("()", &["error: empty combination: ()"]);
         check("(if 1)", &["error: if: bad syntax: (if 1)"]);
-        check("(+ (define z 1) 2)", &["error: define: only allowed at top level: (define z 1)"]);
+        check("(+ (define z 1) 2)", &["error: define: only allowed at top level or at the start of a body: (define z 1)"]);
         check("(define (f x) x) (f) (f 1 2) ((lambda (a . b) a))",
               &["f", "error: f: wrong number of arguments: 0 (expected 1)",
                 "error: f: wrong number of arguments: 2 (expected 1)",

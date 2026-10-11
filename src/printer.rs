@@ -242,6 +242,7 @@ fn print_into(out: &mut String, v: Value, ctx: &mut Ctx) {
             Obj::Template(t) => out.push_str(&format!("#<procedure {}>", t.name)),
             _ => unreachable!(),
         },
+        Obj::Box(_) => out.push_str("#<box>"),
         Obj::Template(t) if t.name.is_empty() => out.push_str("#<template>"),
         Obj::Template(t) => out.push_str(&format!("#<template {}>", t.name)),
     }
