@@ -5,6 +5,11 @@
 //! checks the argument count against `min`/`max` before calling, so the
 //! functions below can index `args` directly.
 //!
+//! A few procedures need more than the heap: `dis` (and later `eval`) must
+//! compile, which needs the top-level environment. These are *VM
+//! primitives* (03 §11): still first-class procedure values, but called
+//! with the VM's context.
+//!
 //! ponytail: P1's arithmetic takes fixnums only (results may be bignums).
 //! P6 replaces it with s1's numeric tower.
 
@@ -12,6 +17,7 @@ use std::io::Write;
 
 use num_bigint::BigInt;
 
+use crate::compile;
 use crate::globals::Env;
 use crate::heap::{Heap, Obj};
 use crate::printer::{display_value, print_value};
@@ -19,17 +25,33 @@ use crate::value::Value;
 
 pub type BuiltinFn = fn(&mut Heap, &[Value]) -> Result<Value, String>;
 
-/// A builtin procedure: its name, its argument count, and its code.
+/// A VM primitive's code: it also gets the environment the running code
+/// belongs to.
+// ponytail: returns a value, which is all `dis` needs. P7 changes this to
+// return an `Action` (03 §11), so `eval` can tail-call the code it compiles
+// and `%call/cc` can resume a continuation.
+pub type VmFn = fn(&mut Heap, &mut Env, &[Value]) -> Result<Value, String>;
+
+pub enum PrimFn {
+    Builtin(BuiltinFn),
+    Vm(VmFn),
+}
+
+/// A procedure written in Rust: its name, its argument count, and its code.
 pub struct Primitive {
     pub name: &'static str,
     pub min: usize,
     /// None for "any number".
     pub max: Option<usize>,
-    pub f: BuiltinFn,
+    pub f: PrimFn,
 }
 
 const fn prim(name: &'static str, min: usize, max: Option<usize>, f: BuiltinFn) -> Primitive {
-    Primitive { name, min, max, f }
+    Primitive { name, min, max, f: PrimFn::Builtin(f) }
+}
+
+const fn vm_prim(name: &'static str, min: usize, max: Option<usize>, f: VmFn) -> Primitive {
+    Primitive { name, min, max, f: PrimFn::Vm(f) }
 }
 
 static PRIMITIVES: &[Primitive] = &[
@@ -44,6 +66,7 @@ static PRIMITIVES: &[Primitive] = &[
     prim("cons", 2, Some(2), |h, a| Ok(h.cons(a[0], a[1]))),
     prim("display", 1, Some(1), display),
     prim("newline", 0, Some(0), newline),
+    vm_prim("dis", 1, Some(1), dis),
 ];
 
 /// Define every builtin in `env`.
@@ -116,5 +139,13 @@ fn display(_: &mut Heap, args: &[Value]) -> Result<Value, String> {
 fn newline(_: &mut Heap, _: &[Value]) -> Result<Value, String> {
     println!();
     std::io::stdout().flush().ok();
+    Ok(Value::UNSPECIFIED)
+}
+
+/// `(dis datum)`: compile `datum` as a top-level form for the current
+/// environment and print its disassembly, without running it.
+fn dis(heap: &mut Heap, env: &mut Env, args: &[Value]) -> Result<Value, String> {
+    let template = compile::compile(heap, env, args[0])?;
+    print!("{}", compile::disasm::disassemble(&template));
     Ok(Value::UNSPECIFIED)
 }

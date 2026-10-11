@@ -62,6 +62,14 @@ fn file_results_are_not_written() {
 }
 
 #[test]
+fn dis_prints_code_without_running_it() {
+    let o = s2(&["-e", "(dis '(display 1)) (dis '(if))"], "");
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(stdout(&o), "template top-level\n   0  GlobalRef k0     ; display\n   1  Fixnum 1\n   2  Call 1\n   3  Return\n");
+    assert!(String::from_utf8_lossy(&o.stderr).contains("if: bad syntax: (if)"));
+}
+
+#[test]
 fn bad_usage() {
     assert_eq!(s2(&["-x"], "").status.code(), Some(2));
 }

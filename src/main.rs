@@ -58,7 +58,7 @@ impl Session {
         if self.dis {
             print!("{}", compile::disasm::disassemble(&template));
         }
-        vm::run(&mut self.heap, &template)
+        vm::run(&mut self.heap, &mut self.env, &template)
     }
 
     /// Evaluate every form from `port`. Returns false if any form had an

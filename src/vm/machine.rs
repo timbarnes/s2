@@ -4,7 +4,8 @@
 //! `Return`, and calls go only to primitives, which return at once. Frames
 //! arrive with `lambda` in P2.
 
-use crate::globals::{cell_name, cell_value};
+use crate::builtins::PrimFn;
+use crate::globals::{Env, cell_name, cell_value};
 use crate::heap::{GcRef, Heap, Obj};
 use crate::printer::print_value;
 use crate::value::Value;
@@ -12,7 +13,9 @@ use crate::vm::op::{Op, Template};
 
 /// Run a template of no arguments and return its value. An error aborts the
 /// whole form; there is no `raise` until P7.
-pub fn run(heap: &mut Heap, t: &Template) -> Result<Value, String> {
+/// `env` is the environment the code was compiled for, which VM primitives
+/// such as `dis` need.
+pub fn run(heap: &mut Heap, env: &mut Env, t: &Template) -> Result<Value, String> {
     let mut stack: Vec<Value> = Vec::new();
     let mut ip = 0;
     loop {
@@ -57,7 +60,11 @@ pub fn run(heap: &mut Heap, t: &Template) -> Result<Value, String> {
                 if n < p.min || p.max.is_some_and(|max| n > max) {
                     return Err(format!("{}: wrong number of arguments: {}", p.name, n));
                 }
-                let result = (p.f)(heap, &stack[base + 1..])?;
+                let args = &stack[base + 1..];
+                let result = match p.f {
+                    PrimFn::Builtin(f) => f(heap, args)?,
+                    PrimFn::Vm(f) => f(heap, env, args)?,
+                };
                 stack.truncate(base);
                 stack.push(result);
             }
