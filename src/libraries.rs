@@ -226,9 +226,14 @@ pub fn register_standard_libraries(heap: &mut Heap, system: GcRef) {
         let name = name.iter().map(|part| part.to_string()).collect();
         heap.libraries.insert(name, Library { exports, env: None, unimplemented });
     }
-    // (s2): everything else, in name order.
-    let mut rest: Vec<(GcRef, TopBinding)> =
-        bindings.into_iter().filter(|&(symbol, binding)| !standard.contains(&symbol) && bound(binding)).collect();
+    // (s2): everything else, in name order. Not the hidden definitions
+    // that macros make under aliases (`define-record-type`'s `index`).
+    let mut rest: Vec<(GcRef, TopBinding)> = bindings
+        .into_iter()
+        .filter(|&(id, binding)| {
+            !standard.contains(&id) && bound(binding) && !matches!(kind(Value::obj(id)), Some(Obj::Alias { .. }))
+        })
+        .collect();
     rest.sort_by_key(|&(symbol, _)| id_name(symbol).to_string());
     heap.libraries.insert(vec!["s2".to_string()], Library { exports: rest, env: None, unimplemented: Vec::new() });
 }

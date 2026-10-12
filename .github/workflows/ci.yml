@@ -1,0 +1,50 @@
+# Build s2 and run its tests on Linux and macOS on every push and pull
+# request: cargo test (the unit, golden, process and Scheme tests), then
+# the R7RS conformance suite against its baseline (tests/r7rs). The
+# differential tests against s1 skip themselves, as s1 isn't built here.
+# Not Windows: s2 has never been tried there.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch cancels the run in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release
+      - name: Rust tests
+        run: cargo test --release
+      - name: R7RS conformance suite
+        run: S2_BIN="$PWD/target/release/s2" tests/r7rs/run.sh
+      - name: Run from outside the repository
+        run: |
+          # The core library is built in, so s2 must not need the repo.
+          s2="$PWD/target/release/s2"
+          cd "$RUNNER_TEMP"
+          echo '(display (when #t (map (lambda (x) (* x x)) (list 1 2 3))))' > t.scm
+          test "$("$s2" t.scm)" = "(1 4 9)"
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: logs-${{ matrix.os }}
+          path: tests/r7rs/last-run.log

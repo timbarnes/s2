@@ -1,0 +1,56 @@
+# Build the user docs (docs/, with MkDocs) and the internal docs (cargo doc)
+# and publish them on GitHub Pages on every push to main: the user docs at
+# https://timbarnes.github.io/s2/ and the internal docs under api/.
+# .cargo/config.toml turns on --document-private-items.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push waits rather than cancelling.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Build user docs
+        run: |
+          pip install "mkdocs<2" mkdocs-material
+          mkdocs build --strict
+      - name: Build internal docs
+        run: cargo doc --no-deps
+      - name: Put the internal docs under api/
+        run: |
+          # rustdoc's lock file isn't readable by the artifact upload.
+          rm -f target/doc/.lock
+          cp -r target/doc site/api
+          echo '<meta http-equiv="refresh" content="0; url=s2/index.html">' > site/api/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

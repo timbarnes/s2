@@ -1,0 +1,89 @@
+# User documentation, built from docs/ with MkDocs and the Material theme,
+# and the design notes in plan/ (docs/design links to it). The Docs workflow
+# publishes it at https://timbarnes.github.io/s2/, with the internal
+# (cargo doc) docs under api/.
+# Preview locally with `mkdocs serve`.
+site_name: s2 Scheme
+site_url: https://timbarnes.github.io/s2/
+site_description: User reference and design notes for the s2 Scheme compiler
+repo_url: https://github.com/timbarnes/s2
+repo_name: timbarnes/s2
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.footer
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+markdown_extensions:
+  - tables
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Language:
+    - Lexical Syntax: lexical-syntax.md
+    - Primitive Expressions: primitive-expressions.md
+    - Derived Expressions: derived-expressions.md
+    - Macros: macros.md
+    - Program Structure: program-structure.md
+    - Records: records.md
+    - Libraries: libraries.md
+  - Standard Procedures:
+    - Equivalence Predicates: equivalence-predicates.md
+    - Numbers: numbers.md
+    - Booleans: booleans.md
+    - Pairs and Lists: pairs-and-lists.md
+    - Symbols: symbols.md
+    - Characters: characters.md
+    - Strings: strings.md
+    - Vectors: vectors.md
+    - Bytevectors: bytevectors.md
+    - Control Features: control-features.md
+    - Exceptions: exceptions.md
+    - Environments and Evaluation: environments.md
+    - Input and Output: input-and-output.md
+    - System Interface: system-interface.md
+  - Standards Conformance: conformance.md
+  - s2 Extensions: extensions.md
+  - Design:
+    - Overview: design/README.md
+    - 01 Review of s1: design/01-s1-review.md
+    - 02 Approaches: design/02-approaches.md
+    - 03 Architecture: design/03-architecture.md
+    - 04 Roadmap: design/04-roadmap.md
+    - 05 Testing and measurement: design/05-testing.md
+    - 06 Directions after P10: design/06-directions.md
+    - 07 Comparison with other Schemes: design/07-comparison.md
+    - Phases:
+      - P0: design/phases/P0.md
+      - P1: design/phases/P1.md
+      - P2: design/phases/P2.md
+      - P3: design/phases/P3.md
+      - P4: design/phases/P4.md
+      - P5: design/phases/P5.md
+      - P6: design/phases/P6.md
+      - P7: design/phases/P7.md
+      - P8: design/phases/P8.md
+      - P9: design/phases/P9.md
+      - P10: design/phases/P10.md
+      - P11: design/phases/P11.md
+      - P12: design/phases/P12.md
+  - Internal docs: https://timbarnes.github.io/s2/api/s2/

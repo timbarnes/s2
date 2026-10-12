@@ -79,6 +79,14 @@
 (test-equal '(case-lambda) (library-exports '(scheme case-lambda)) "library-exports")
 (test-equal '(#t #t) (list (and (member '(scheme base) (library-names)) #t) (and (member '(s2) (library-names)) #t))
     "library-names")
+;; (s2) exports s2's own names, not the hidden definitions macros make
+;; (define-record-type's field index is defined under an alias of `index`).
+(test-equal '(define-library dis environment? library-exports library-names port?)
+    (let loop ((names (library-exports '(s2))) (acc '()))
+      (cond ((null? names) (reverse acc))
+            ((char=? (string-ref (symbol->string (car names)) 0) #\%) (loop (cdr names) acc))
+            (else (loop (cdr names) (cons (car names) acc)))))
+    "(s2) exports")
 
 ;; What R7RS assigns the standard libraries that s2 doesn't define: only
 ;; the complex-number procedures, which aren't planned.

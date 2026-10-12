@@ -3,3 +3,8 @@
 # deeply nested code.
 [env]
 RUST_MIN_STACK = "1073741824"
+
+# cargo doc documents private items too: the internal docs are for working
+# on s2 (published under api/ by .github/workflows/docs.yml).
+[build]
+rustdocflags = ["--document-private-items"]
