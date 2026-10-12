@@ -58,6 +58,7 @@ fn abort(vm: &mut Vm, _: &mut Heap, args: &[Value]) -> Result<Value, Error> {
 fn dis(_: &mut Vm, heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let env = heap.interaction.unwrap();
     let template = compile::compile(heap, env, args[0]).map_err(|e| err!("{}", e))?;
-    print!("{}", compile::disasm::disassemble(template));
+    let text = compile::disasm::disassemble(template);
+    crate::io::write_stdout(heap, &text);
     Ok(Value::UNSPECIFIED)
 }

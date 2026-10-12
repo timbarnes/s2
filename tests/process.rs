@@ -220,14 +220,14 @@ fn unclosed_file_output_is_written_however_the_program_ends() {
     }
 }
 
-/// Output into a pipe whose reader has gone ends s2 quietly, by SIGPIPE,
-/// as it ends `cat`, rather than with a panic.
-#[cfg(unix)]
+/// Output into a pipe whose reader has gone ends s2 quietly, with the
+/// status a program killed by SIGPIPE gets, rather than with a panic.
 #[test]
 fn closed_output_pipe_ends_s2_quietly() {
-    use std::os::unix::process::ExitStatusExt;
+    // A file it was writing is flushed first, as at any exit.
+    let file = std::env::temp_dir().join(format!("s2-process-test-{}-pipe.txt", std::process::id()));
     let mut child = Command::new(env!("CARGO_BIN_EXE_s2"))
-        .args(["-e", "(let loop () (display \"x\") (loop))"])
+        .args(["-e", &format!("(let ((f (open-output-file {:?}))) (write-string \"kept\" f) (let loop () (display \"x\") (loop)))", file.to_str().unwrap())])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -235,6 +235,8 @@ fn closed_output_pipe_ends_s2_quietly() {
         .unwrap();
     drop(child.stdout.take());
     let out = child.wait_with_output().unwrap();
-    assert_eq!(out.status.signal(), Some(13), "{:?}", out.status);
+    assert_eq!(out.status.code(), Some(141), "{:?}", out.status);
     assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "kept");
+    std::fs::remove_file(&file).ok();
 }

@@ -173,11 +173,11 @@ impl Session {
 
     fn run(&mut self, ast: &compile::ast::Expr) -> Result<Value, String> {
         if self.expand {
-            println!("{}", compile::ast::show(ast));
+            io::write_stdout(&self.heap, &format!("{}\n", compile::ast::show(ast)));
         }
         let template = compile::codegen::codegen(&mut self.heap, ast);
         if self.dis {
-            print!("{}", compile::disasm::disassemble(template));
+            io::write_stdout(&self.heap, &compile::disasm::disassemble(template));
         }
         self.vm.run(&mut self.heap, template)
     }
@@ -200,7 +200,7 @@ impl Session {
         let mut ok = true;
         loop {
             if prompt {
-                print!("s2> ");
+                io::write_stdout(&self.heap, "s2> ");
                 std::io::stdout().flush().ok();
             }
             let result = match parse(&mut self.heap, port) {
@@ -212,9 +212,11 @@ impl Session {
                 Ok(v) if write_results => {
                     // Several values print one per line; none, nothing.
                     match v.as_obj().map(|o| &o.kind) {
-                        Some(heap::Obj::Values(items)) => items.iter().for_each(|&v| println!("{}", printer::print_value(v))),
+                        Some(heap::Obj::Values(items)) => {
+                            items.iter().for_each(|&v| io::write_stdout(&self.heap, &format!("{}\n", printer::print_value(v))))
+                        }
                         _ if v.is_unspecified() => {}
-                        _ => println!("{}", printer::print_value(v)),
+                        _ => io::write_stdout(&self.heap, &format!("{}\n", printer::print_value(v))),
                     }
                 }
                 Ok(_) => {}
@@ -376,31 +378,9 @@ fn compile_to(session: &mut Session, file: &str, out: &Path) -> bool {
 const STACK_SIZE: usize = 1 << 30;
 
 fn main() {
-    restore_sigpipe();
     let session = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(run_main).unwrap();
     session.join().unwrap();
 }
-
-/// Let a closed output pipe end s2 quietly, as it ends `cat`: `s2 prog.scm
-/// | head` stops when `head` does. Rust starts programs with SIGPIPE
-/// ignored, so a write to a closed pipe fails instead, and `print!`
-/// panics on the failure.
-#[cfg(unix)]
-fn restore_sigpipe() {
-    // ponytail: declared here rather than adding the libc crate for one call.
-    unsafe extern "C" {
-        fn signal(signum: i32, handler: usize) -> usize;
-    }
-    const SIGPIPE: i32 = 13; // the same on Linux and macOS
-    const SIG_DFL: usize = 0;
-    // SAFETY: called first in main, before any other thread exists.
-    unsafe {
-        signal(SIGPIPE, SIG_DFL);
-    }
-}
-
-#[cfg(not(unix))]
-fn restore_sigpipe() {}
 
 fn run_main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -418,7 +398,7 @@ fn run_main() {
             let prompt = std::io::stdin().is_terminal();
             let ok = session.eval_port(&mut PortKind::Stdin, prompt, true);
             if prompt {
-                println!();
+                io::write_stdout(&session.heap, "\n");
             }
             ok
         }

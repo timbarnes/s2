@@ -230,6 +230,22 @@ fn utf8_char_width(first: u8) -> usize {
     }
 }
 
+/// Write `text` to standard output. If standard output is a pipe whose
+/// reader has gone (`s2 prog.scm | head`), end s2 quietly, as such a pipe
+/// ends `cat`: flush the open file ports, as every exit does, and exit
+/// with 141, the status a shell gives a program killed by SIGPIPE.
+pub fn write_stdout(heap: &crate::heap::Heap, text: &str) {
+    match io::stdout().lock().write_all(text.as_bytes()) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
+            heap.flush_ports();
+            std::process::exit(141);
+        }
+        Err(e) => panic!("failed printing to stdout: {}", e),
+    }
+}
+
+
 /// Create a new string port for in-memory string I/O.
 ///
 /// String ports allow reading from a string as if it were a file, with

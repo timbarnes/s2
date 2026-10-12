@@ -133,19 +133,19 @@ pub static PRIMITIVES: &[Primitive] = &[
             _ => Err("char-ready?: not a textual input port".into()),
         }
     }),
-    vm_prim("write", 1, Some(2), |vm, _, a| put_str(current(vm, a, 1, OUTPUT), &print_value(a[0]), "write")),
-    vm_prim("write-shared", 1, Some(2), |vm, _, a| put_str(current(vm, a, 1, OUTPUT), &write_shared_value(a[0]), "write-shared")),
-    vm_prim("write-simple", 1, Some(2), |vm, _, a| put_str(current(vm, a, 1, OUTPUT), &write_simple_value(a[0]), "write-simple")),
-    vm_prim("display", 1, Some(2), |vm, _, a| put_str(current(vm, a, 1, OUTPUT), &display_value(a[0]), "display")),
-    vm_prim("newline", 0, Some(1), |vm, _, a| put_str(current(vm, a, 0, OUTPUT), "\n", "newline")),
-    vm_prim("write-char", 1, Some(2), |vm, _, a| {
+    vm_prim("write", 1, Some(2), |vm, h, a| put_str(h, current(vm, a, 1, OUTPUT), &print_value(a[0]), "write")),
+    vm_prim("write-shared", 1, Some(2), |vm, h, a| put_str(h, current(vm, a, 1, OUTPUT), &write_shared_value(a[0]), "write-shared")),
+    vm_prim("write-simple", 1, Some(2), |vm, h, a| put_str(h, current(vm, a, 1, OUTPUT), &write_simple_value(a[0]), "write-simple")),
+    vm_prim("display", 1, Some(2), |vm, h, a| put_str(h, current(vm, a, 1, OUTPUT), &display_value(a[0]), "display")),
+    vm_prim("newline", 0, Some(1), |vm, h, a| put_str(h, current(vm, a, 0, OUTPUT), "\n", "newline")),
+    vm_prim("write-char", 1, Some(2), |vm, h, a| {
         let c = char_arg(a[0], "write-char")?;
-        put_str(current(vm, a, 1, OUTPUT), &c.to_string(), "write-char")
+        put_str(h, current(vm, a, 1, OUTPUT), &c.to_string(), "write-char")
     }),
-    vm_prim("write-string", 1, Some(4), |vm, _, a| {
+    vm_prim("write-string", 1, Some(4), |vm, h, a| {
         let chars: Vec<char> = string_arg(a[0], "write-string")?.borrow().chars().collect();
         let (start, end) = range_args(a, 2, chars.len(), "write-string")?;
-        put_str(current(vm, a, 1, OUTPUT), &chars[start..end].iter().collect::<String>(), "write-string")
+        put_str(h, current(vm, a, 1, OUTPUT), &chars[start..end].iter().collect::<String>(), "write-string")
     }),
     vm_prim("write-u8", 1, Some(2), |vm, _, a| {
         let b = a[0].as_fixnum().and_then(|n| u8::try_from(n).ok()).ok_or_else(|| expected("write-u8", "a byte (0 to 255)", a[0]))?;
@@ -251,9 +251,9 @@ fn port_test(v: Value, test: fn(&PortKind) -> bool) -> Result<Value, Error> {
 }
 
 /// Write text to a textual output port.
-fn put_str(port_value: Value, text: &str, who: &str) -> Result<Value, Error> {
+fn put_str(heap: &Heap, port_value: Value, text: &str, who: &str) -> Result<Value, Error> {
     match &mut *port(port_value, who)?.borrow_mut() {
-        PortKind::Stdout => print!("{}", text),
+        PortKind::Stdout => crate::io::write_stdout(heap, text),
         PortKind::Stderr => {
             // Keep stderr output in order with buffered stdout output.
             std::io::stdout().flush().ok();
