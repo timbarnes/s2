@@ -170,6 +170,13 @@ features that would make it practical rather than educational:
 
 ## Performance
 
+> **Since these measurements:** s2's values are now NaN-boxed, one 64-bit
+> word instead of a 16-byte enum (D2). That made s2 1.22 times faster on
+> 35 of these benchmarks (geometric mean, 1.12-1.42x each), with
+> `gcbench` and the small I/O benchmarks unchanged. Gauche's lead over s2
+> shrinks from about 1.8x to about 1.5x. The tables below are P12's, from
+> before the change.
+
 ecraven's [r7rs-benchmarks](https://github.com/ecraven/r7rs-benchmarks),
 57 programs, run by `bench/r7rs/run.sh`:
 

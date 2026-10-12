@@ -52,6 +52,16 @@ impl GcRef {
         // Safety: see above; the heap owns the allocation and never moves it.
         unsafe { self.0.as_ref() }
     }
+
+    /// The object's address, for `Value`'s encoding.
+    pub(crate) fn addr(self) -> u64 {
+        self.0.as_ptr() as u64
+    }
+
+    /// The `GcRef` at `addr`, which must have come from `addr`.
+    pub(crate) fn from_addr(addr: u64) -> GcRef {
+        GcRef(NonNull::new(addr as *mut GcObject).expect("a GcRef is never null"))
+    }
 }
 
 /// A heap object.

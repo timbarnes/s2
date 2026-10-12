@@ -59,7 +59,10 @@ const MAGIC: &[u8; 8] = b"s2fasl\r\n";
 
 /// Bump when the encoding, or the meaning of an instruction, changes:
 /// files written by another version are refused.
-const VERSION: u32 = 1;
+///
+/// 2: fixnums are 48-bit (NaN-boxed values), so a version 1 file can hold
+/// fixnums that no longer are.
+const VERSION: u32 = 2;
 
 /// Whether `bytes` are a compiled file (of any version).
 pub fn is_fasl(bytes: &[u8]) -> bool {

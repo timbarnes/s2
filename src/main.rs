@@ -851,7 +851,7 @@ mod tests {
         }
         let mut other = bytes.clone();
         other[8] = 99;
-        assert_eq!(fasl::read(&mut s.heap, s.env, &other).unwrap_err(), "compiled file is version 99, and this s2 reads version 1: compile it again");
+        assert_eq!(fasl::read(&mut s.heap, s.env, &other).unwrap_err(), "compiled file is version 99, and this s2 reads version 2: compile it again");
     }
 
     #[test]
