@@ -376,9 +376,31 @@ fn compile_to(session: &mut Session, file: &str, out: &Path) -> bool {
 const STACK_SIZE: usize = 1 << 30;
 
 fn main() {
+    restore_sigpipe();
     let session = std::thread::Builder::new().stack_size(STACK_SIZE).spawn(run_main).unwrap();
     session.join().unwrap();
 }
+
+/// Let a closed output pipe end s2 quietly, as it ends `cat`: `s2 prog.scm
+/// | head` stops when `head` does. Rust starts programs with SIGPIPE
+/// ignored, so a write to a closed pipe fails instead, and `print!`
+/// panics on the failure.
+#[cfg(unix)]
+fn restore_sigpipe() {
+    // ponytail: declared here rather than adding the libc crate for one call.
+    unsafe extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    const SIGPIPE: i32 = 13; // the same on Linux and macOS
+    const SIG_DFL: usize = 0;
+    // SAFETY: called first in main, before any other thread exists.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn restore_sigpipe() {}
 
 fn run_main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -440,6 +462,8 @@ mod tests {
         loop {
             match parse(&mut s.heap, &mut port) {
                 Ok(datum) => out.push(match s.eval(datum) {
+                    // As the REPL shows it: nothing for an unspecified result.
+                    Ok(v) if v.is_unspecified() => String::new(),
                     Ok(v) => printer::print_value(v),
                     Err(msg) => format!("error: {}", msg),
                 }),

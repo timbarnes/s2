@@ -40,7 +40,7 @@ R7RS leaves these to the implementation.
 | Order of evaluating a call's operator and operands | left to right, operator first |
 | Order `map` applies its procedure | first element to last |
 | Value of `define` | the symbol defined (the REPL prints `name`) |
-| Unspecified values (`(if #f #f)`, `set!`, ...) | a value that prints as nothing |
+| Unspecified values (`(if #f #f)`, `set!`, ...) | a value that prints as `#<unspecified>`; the REPL shows nothing for it |
 | `letrec` | evaluates its inits left to right, like `letrec*` |
 | `eq?` on numbers and characters | the same as `eqv?` for characters, fixnums and flonums; bignums and ratios are `eq?` only to themselves |
 | Numbers | exact integers of any size, exact rationals, and 64-bit IEEE flonums ([Numbers](./numbers.md)) |

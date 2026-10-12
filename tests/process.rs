@@ -219,3 +219,22 @@ fn unclosed_file_output_is_written_however_the_program_ends() {
         std::fs::remove_file(&program).ok();
     }
 }
+
+/// Output into a pipe whose reader has gone ends s2 quietly, by SIGPIPE,
+/// as it ends `cat`, rather than with a panic.
+#[cfg(unix)]
+#[test]
+fn closed_output_pipe_ends_s2_quietly() {
+    use std::os::unix::process::ExitStatusExt;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_s2"))
+        .args(["-e", "(let loop () (display \"x\") (loop))"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.signal(), Some(13), "{:?}", out.status);
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+}

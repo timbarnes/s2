@@ -19,6 +19,8 @@ s2 --compile FILE [-o OUT]  compile the program FILE to OUT (by default FILE
 * **The REPL** is described in [Program Structure](./program-structure.md#the-repl).
 * **The flags** show what the compiler does with each form before it runs: `--expand` prints the core form after macro expansion, and `--dis` the compiled bytecode.
 
+If standard output is a pipe whose reader closes it, s2 ends at once, as `cat` does: `s2 prog.scm | head` stops when `head` has its lines.
+
 s2's core library, `scheme/core.scm`, is built into the binary, so s2 runs from any directory. Its compiled form is cached next to the executable, as `s2-core.s2o`, the first time s2 runs after a build; if that file can't be written, s2 compiles the core at every start.
 
 ### Compiled programs

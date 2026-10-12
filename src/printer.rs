@@ -326,8 +326,12 @@ fn print_immediate(out: &mut String, v: Value, write: bool) {
         out.push_str("#<eof>");
     } else if v.is_undefined() {
         out.push_str("#<undefined>");
+    } else if v.is_unspecified() {
+        // The REPL and -e show nothing for an unspecified result
+        // (main.rs); inside data it must still show, or `(list 1 (if #f
+        // #f))` would print as `(1 )`.
+        out.push_str("#<unspecified>");
     }
-    // Unspecified prints as nothing, so the REPL shows nothing for it.
 }
 
 /// Format a flonum so it reads back as one: always with a decimal point or
@@ -457,7 +461,7 @@ mod tests {
             (Value::char('\n'), "#\\newline", "\n"),
             (foo, "foo", "foo"),
             (Value::NIL, "()", "()"),
-            (Value::UNSPECIFIED, "", ""),
+            (Value::UNSPECIFIED, "#<unspecified>", "#<unspecified>"),
             (Value::UNDEFINED, "#<undefined>", "#<undefined>"),
             (Value::EOF, "#<eof>", "#<eof>"),
         ] {

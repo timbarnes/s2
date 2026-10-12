@@ -38,7 +38,7 @@ For procedures with optional arguments or several argument counts, see [`case-la
 
 `(if test consequent [alternate])`
 
-Evaluates `test`. If its value is anything but `#f`, evaluates and returns `consequent`; otherwise `alternate`. Without an alternate, the result when `test` is false is unspecified. In s2 that is a value that prints as nothing (see [Input and Output](./input-and-output.md#how-objects-print)).
+Evaluates `test`. If its value is anything but `#f`, evaluates and returns `consequent`; otherwise `alternate`. Without an alternate, the result when `test` is false is unspecified. In s2 that is a value that prints as `#<unspecified>` (see [Input and Output](./input-and-output.md#how-objects-print)).
 
 ## `set!`
 

@@ -69,7 +69,7 @@ Each takes an optional port, defaulting to the current output port.
 * Syntax keywords, such as `if` or a macro, aren't values: using one as an expression is an error (`if: syntax used as a variable`).
 * Ports print by kind: `#<input-port string>`, `#<output-port stdout>`, `#<output-port "out.txt">`, `#<binary-input-port bytevector>`, `#<closed-port>`.
 * A record prints as its type name followed by its field values, `#<<point> 1 2>`; an error object as `#<error "message" irritant ...>`; an environment as `#<environment>`.
-* An unspecified value, such as the result of `(if #f #f)`, prints as nothing, so the REPL shows nothing for `set!` or `vector-fill!`. Inside a list it leaves a gap: `(list 1 (if #f #f))` prints as `(1 )`. The end-of-file object prints as `#<eof>`.
+* An unspecified value, such as the result of `(if #f #f)`, prints as `#<unspecified>`: `(list 1 (if #f #f))` is `(1 #<unspecified>)`. The REPL shows nothing for an unspecified result, so `set!` or `vector-fill!` print nothing there. The end-of-file object prints as `#<eof>`.
 
 ## Files
 
