@@ -1,0 +1,53 @@
+template top-level
+   0  MakeClosure k0   ; #<template walk>
+   1  GlobalDefine k1  ; walk
+   2  Return
+template walk  arity 2
+   0  LocalRef 0       ; l
+   1  JumpIfNot NullP →10
+   2  LocalRef 1       ; n
+   3  Fixnum 100000
+   4  JumpIfNot Ge →7
+   5  CarLocal 0       ; l
+   6  Return
+   7  LocalRef 1       ; n
+   8  SubImm 3
+   9  Return
+  10  GlobalRef k0     ; walk
+  11  CdrLocal 0       ; l
+  12  LocalRef 1       ; n
+  13  AddImm 1
+  14  TailCall 2
+template top-level
+   0  MakeClosure k0   ; #<template boxed>
+   1  GlobalDefine k1  ; boxed
+   2  Return
+template boxed  arity 1
+   0  MakeBox 0        ; l
+   1  LocalRef 0       ; l
+   2  LocalRef 0       ; l
+   3  BoxRef
+   4  Cdr
+   5  BoxSet
+   6  Unspecified
+   7  Pop
+   8  LocalRef 0       ; l
+   9  BoxRef
+  10  Car
+  11  Return
+template top-level
+   0  MakeClosure k0   ; #<template big>
+   1  GlobalDefine k1  ; big
+   2  Return
+template big  arity 1
+   0  LocalRef 0       ; n
+   1  Fixnum 100000
+   2  JumpIfNot Lt →7
+   3  LocalRef 0       ; n
+   4  Const k0         ; 100000000000
+   5  Add
+   6  Return
+   7  LocalRef 0       ; n
+   8  Fixnum 1
+   9  EqP
+  10  Return

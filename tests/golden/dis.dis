@@ -4,20 +4,17 @@ template top-level
    2  TailCall 1
 template top-level
    0  Fixnum 2
-   1  Fixnum 3
-   2  Add
-   3  Return
+   1  AddImm 3
+   2  Return
 template top-level
    0  GlobalRef k0     ; dis
    1  Const k1         ; (if (< x 20) (+ x 1) 0)
    2  TailCall 1
 template top-level
    0  GlobalRef k0     ; x
-   1  Fixnum 20
-   2  JumpIfNot Lt →7
-   3  GlobalRef k0     ; x
-   4  Fixnum 1
-   5  Add
+   1  JumpIfNotImm Lt 20 →5
+   2  GlobalRef k0     ; x
+   3  AddImm 1
+   4  Return
+   5  Fixnum 0
    6  Return
-   7  Fixnum 0
-   8  Return

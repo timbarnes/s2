@@ -12,14 +12,13 @@ template (lambda)  arity 0  free 1
    0  FreeRef 0        ; n
    1  FreeRef 0        ; n
    2  BoxRef
-   3  Fixnum 1
-   4  Add
-   5  BoxSet
-   6  Unspecified
-   7  Pop
-   8  FreeRef 0        ; n
-   9  BoxRef
-  10  Return
+   3  AddImm 1
+   4  BoxSet
+   5  Unspecified
+   6  Pop
+   7  FreeRef 0        ; n
+   8  BoxRef
+   9  Return
 template top-level
    0  MakeClosure k0   ; #<template f>
    1  GlobalDefine k1  ; f
@@ -29,17 +28,16 @@ template f  arity 2
    1  LocalRef 0       ; x
    2  LocalRef 0       ; x
    3  BoxRef
-   4  Fixnum 1
-   5  Add
-   6  BoxSet
-   7  Unspecified
-   8  Pop
-   9  LocalRef 0       ; x
-  10  BoxRef
-  11  LocalRef 1       ; y
-  12  MakeClosure k0   ; #<template>
-  13  Cons
-  14  Return
+   4  AddImm 1
+   5  BoxSet
+   6  Unspecified
+   7  Pop
+   8  LocalRef 0       ; x
+   9  BoxRef
+  10  LocalRef 1       ; y
+  11  MakeClosure k0   ; #<template>
+  12  Cons
+  13  Return
 template (lambda)  arity 0  free 1
    0  FreeRef 0        ; y
    1  Return

@@ -264,7 +264,7 @@ can decode into `Op`s.
 | Procedures | `MakeClosure(k, nfree)` (template `k`; captures the `nfree` values on the stack), `Call(argc)`, `TailCall(argc)`, `Return` |
 | Arity | checked at entry from the template's arity, not by an instruction; `case-lambda` templates hold several entry points |
 | Added in P7 | `CaptureCont`, `ResumeCont`, `Values` support (§10) |
-| Added in P10 | inlined primitives (`Car`, `Cdr`, `Cons`, `Add`, `Sub`, `Lt`, `NumEq`, `EqP`, `NullP`, `PairP`, …; after P12 also `Mul`, `Div` and the vector accessors) and superinstructions |
+| Added in P10 | inlined primitives (`Car`, `Cdr`, `Cons`, `Add`, `Sub`, `Lt`, `NumEq`, `EqP`, `NullP`, `PairP`, …; after P12 also `Mul`, `Div` and the vector accessors) and superinstructions (`JumpIfNot`; after P12 `CarLocal`, `CdrLocal`, `AddImm`, `SubImm`, `JumpIfNotImm`) |
 
 **A worked example.** `(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))`
 after P2, where every primitive is a global call:

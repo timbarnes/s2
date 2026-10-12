@@ -106,6 +106,20 @@ pub enum Op {
     VectorLength,
     VectorRef,
     VectorSet,
+    // Superinstructions (after P12), chosen from the instruction counts
+    // of the r7rs benchmarks. Each does what the two instructions it
+    // replaces would, fast and slow path alike.
+    /// `LocalRef(i)` then `Car`: `car` of an unboxed local.
+    CarLocal(u16),
+    /// `LocalRef(i)` then `Cdr`.
+    CdrLocal(u16),
+    /// `Fixnum(k)` then `Add`: add a constant.
+    AddImm(i32),
+    /// `Fixnum(k)` then `Sub`: subtract a constant.
+    SubImm(i32),
+    /// `Fixnum(k)` then `JumpIfNot(test, t)`: compare a value with a
+    /// constant, popping it, and jump to `t` unless the comparison holds.
+    JumpIfNotImm(Test, i16, u32),
 }
 
 /// The tests `JumpIfNot` can make: the inlined predicates and

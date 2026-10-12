@@ -113,6 +113,14 @@ fn test_fallback(test: Test) -> crate::builtins::BuiltinFn {
     }
 }
 
+/// Run `f`, out of line: the slow path of an inlined instruction, kept
+/// out of the dispatch loop.
+#[cold]
+#[inline(never)]
+fn cold<T>(f: impl FnOnce() -> T) -> T {
+    f()
+}
+
 fn pair_of<'a>(v: Value) -> Option<(&'a std::cell::Cell<Value>, &'a std::cell::Cell<Value>)> {
     match v.as_obj().map(|o| &o.kind) {
         Some(Obj::Pair { car, cdr }) => Some((car, cdr)),
@@ -248,6 +256,24 @@ impl Vm {
         result
     }
 
+    /// Start raising the error `e` in the frame `here`: the handler to run
+    /// and its frame pointer, or `e`'s message if it can't be handled.
+    #[cold]
+    #[inline(never)]
+    fn raise(&mut self, heap: &mut Heap, e: Error, here: Frame) -> Result<(GcRef, usize), String> {
+        let Some(handler) = (e.kind != ErrorKind::Uncaught).then(|| system_procedure(heap, "%raise-error")).flatten() else {
+            return Err(e.message);
+        };
+        let message = heap.string(&e.message);
+        let irritants = heap.list(e.irritants);
+        let obj = heap.error_object(e.kind, message, irritants);
+        self.frames.push(here);
+        let base = self.stack.len();
+        self.stack.push(handler);
+        self.stack.push(obj);
+        Ok((handler.as_ref().unwrap(), base + 1))
+    }
+
     fn execute(&mut self, heap: &mut Heap, mut closure: GcRef) -> Result<Value, String> {
         let (mut t, mut free) = parts(closure);
         let mut ip = 0;
@@ -288,21 +314,11 @@ impl Vm {
         // it).
         macro_rules! fail {
             ($run:lifetime, $e:expr) => {{
-                let e: Error = $e.into();
-                let Some(handler) = (e.kind != ErrorKind::Uncaught).then(|| system_procedure(heap, "%raise-error")).flatten() else {
-                    return Err(e.message);
-                };
-                let message = heap.string(&e.message);
-                let irritants = heap.list(e.irritants);
-                let obj = heap.error_object(e.kind, message, irritants);
-                self.frames.push(Frame { closure, t, free, ip, fp });
-                let base = self.stack.len();
-                self.stack.push(handler);
-                self.stack.push(obj);
-                closure = handler.as_ref().unwrap();
+                // Out of line, so the error path doesn't bloat every
+                // instruction in the dispatch loop.
+                (closure, fp) = self.raise(heap, $e.into(), Frame { closure, t, free, ip, fp })?;
                 (t, free) = parts(closure);
                 ip = 0;
-                fp = base + 1;
                 continue $run;
             }};
         }
@@ -312,17 +328,22 @@ impl Vm {
         // else the builtin `$slow` is called on them. `$run` is the
         // instruction loop's label, as for `fail!`.
         macro_rules! inline1 {
-            ($run:lifetime, $fast:expr, $slow:path) => {{
+            ($run:lifetime, $fast:expr, $slow:expr) => {{
                 let a = *self.stack.last().unwrap();
-                let v = match $fast(a) {
+                *self.stack.last_mut().unwrap() = fast_or_slow!($run, $fast(a), $slow(heap, &[a]));
+            }};
+        }
+        // `$fast`, a result if it has one, else the builtin call `$slow`'s.
+        macro_rules! fast_or_slow {
+            ($run:lifetime, $fast:expr, $slow:expr) => {
+                match $fast {
                     Some(v) => v,
-                    None => match $slow(heap, &[a]) {
+                    None => match cold(|| $slow) {
                         Ok(v) => v,
                         Err(e) => fail!($run, e),
                     },
-                };
-                *self.stack.last_mut().unwrap() = v;
-            }};
+                }
+            };
         }
         macro_rules! inline2 {
             ($run:lifetime, $fast:expr, $slow:path) => {{
@@ -413,7 +434,7 @@ impl Vm {
                     };
                     let holds = match fast {
                         Some(holds) => holds,
-                        None => match test_fallback(test)(heap, &self.stack[at..]) {
+                        None => match cold(|| test_fallback(test)(heap, &self.stack[at..])) {
                             Ok(v) => v.is_true(),
                             Err(e) => fail!('run, e),
                         },
@@ -605,6 +626,38 @@ impl Vm {
                 Op::Ge => inline2!('run, |a, b| compare(Test::Ge, a, b).map(Value::bool), number::ge),
                 Op::VectorLength => inline1!('run, |a| vector_of(a).and_then(|items| Value::fixnum(items.len() as i64)), vector::vector_length),
                 Op::VectorRef => inline2!('run, |a, b| element(a, b).map(std::cell::Cell::get), vector::vector_ref),
+                Op::CarLocal(i) => {
+                    let a = self.stack[fp + i as usize];
+                    let v = fast_or_slow!('run, pair_of(a).map(|(car, _)| car.get()), list::car(heap, &[a]));
+                    self.stack.push(v);
+                }
+                Op::CdrLocal(i) => {
+                    let a = self.stack[fp + i as usize];
+                    let v = fast_or_slow!('run, pair_of(a).map(|(_, cdr)| cdr.get()), list::cdr(heap, &[a]));
+                    self.stack.push(v);
+                }
+                Op::AddImm(k) => {
+                    let b = Value::fixnum(k as i64).unwrap();
+                    inline1!('run, |a| match nums(a, b)? {
+                        Nums::Fix(x, y) => Value::fixnum(x + y),
+                        Nums::Flo(x, y) => Some(Value::flonum(x + y)),
+                    }, |h, args: &[Value]| number::add(h, &[args[0], b]))
+                }
+                Op::SubImm(k) => {
+                    let b = Value::fixnum(k as i64).unwrap();
+                    inline1!('run, |a| match nums(a, b)? {
+                        Nums::Fix(x, y) => Value::fixnum(x - y),
+                        Nums::Flo(x, y) => Some(Value::flonum(x - y)),
+                    }, |h, args: &[Value]| number::sub(h, &[args[0], b]))
+                }
+                Op::JumpIfNotImm(test, k, target) => {
+                    let a = self.stack.pop().unwrap();
+                    let b = Value::fixnum(k as i64).unwrap();
+                    let holds = fast_or_slow!('run, compare(test, a, b).map(Value::bool), test_fallback(test)(heap, &[a, b]));
+                    if !holds.is_true() {
+                        ip = target as usize;
+                    }
+                }
                 Op::VectorSet => {
                     let at = self.stack.len() - 3;
                     match element(self.stack[at], self.stack[at + 1]) {

@@ -527,6 +527,16 @@ fn put_op(b: &mut Vec<u8>, op: Op) {
         Op::VectorLength => b.push(43),
         Op::VectorRef => b.push(44),
         Op::VectorSet => b.push(45),
+        Op::CarLocal(i) => (b.push(46), u(b, i as u64)).1,
+        Op::CdrLocal(i) => (b.push(47), u(b, i as u64)).1,
+        Op::AddImm(k) => (b.push(48), put_int(b, k as i64)).1,
+        Op::SubImm(k) => (b.push(49), put_int(b, k as i64)).1,
+        Op::JumpIfNotImm(test, k, t) => {
+            b.push(50);
+            b.push(TESTS.iter().position(|&x| x == test).unwrap() as u8);
+            put_int(b, k as i64);
+            u(b, t as u64);
+        }
     }
 }
 
@@ -659,6 +669,15 @@ impl Reader<'_> {
             43 => Op::VectorLength,
             44 => Op::VectorRef,
             45 => Op::VectorSet,
+            46 => Op::CarLocal(self.small()?),
+            47 => Op::CdrLocal(self.small()?),
+            48 => Op::AddImm(i32::try_from(self.int()?).map_err(|_| TRUNCATED)?),
+            49 => Op::SubImm(i32::try_from(self.int()?).map_err(|_| TRUNCATED)?),
+            50 => {
+                let test = *TESTS.get(self.u8()? as usize).ok_or(TRUNCATED)?;
+                let k = i16::try_from(self.int()?).map_err(|_| TRUNCATED)?;
+                Op::JumpIfNotImm(test, k, self.small()?)
+            }
             _ => return Err(TRUNCATED.into()),
         })
     }

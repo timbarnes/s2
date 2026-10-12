@@ -17,26 +17,22 @@ template parity  arity 1
   11  TailCall 1
 template even?  arity 1  free 1
    0  LocalRef 0       ; n
-   1  Fixnum 0
-   2  JumpIfNot NumEq →5
-   3  True
-   4  Return
-   5  FreeRef 0        ; odd?
-   6  LocalRef 0       ; n
-   7  Fixnum 1
-   8  Sub
-   9  TailCall 1
+   1  JumpIfNotImm NumEq 0 →4
+   2  True
+   3  Return
+   4  FreeRef 0        ; odd?
+   5  LocalRef 0       ; n
+   6  SubImm 1
+   7  TailCall 1
 template odd?  arity 1  free 1
    0  LocalRef 0       ; n
-   1  Fixnum 0
-   2  JumpIfNot NumEq →5
-   3  False
-   4  Return
-   5  FreeRef 0        ; even?
-   6  LocalRef 0       ; n
-   7  Fixnum 1
-   8  Sub
-   9  TailCall 1
+   1  JumpIfNotImm NumEq 0 →4
+   2  False
+   3  Return
+   4  FreeRef 0        ; even?
+   5  LocalRef 0       ; n
+   6  SubImm 1
+   7  TailCall 1
 template top-level
    0  MakeClosure k0   ; #<template count-to>
    1  GlobalDefine k1  ; count-to
@@ -59,6 +55,5 @@ template loop  arity 1  free 2
    3  LocalRef 0       ; i
    4  Return
    5  LocalRef 0       ; i
-   6  Fixnum 1
-   7  Add
-   8  SelfTailCall 1
+   6  AddImm 1
+   7  SelfTailCall 1

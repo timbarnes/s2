@@ -42,6 +42,11 @@ fn template_into(out: &mut String, template: GcRef) {
             Op::Jump(target) => (format!("Jump →{}", target), String::new()),
             Op::JumpIfFalse(target) => (format!("JumpIfFalse →{}", target), String::new()),
             Op::JumpIfNot(test, target) => (format!("JumpIfNot {:?} →{}", test, target), String::new()),
+            Op::JumpIfNotImm(test, k, target) => (format!("JumpIfNotImm {:?} {} →{}", test, k, target), String::new()),
+            Op::CarLocal(i) => (format!("CarLocal {}", i), name(&t.local_names, i)),
+            Op::CdrLocal(i) => (format!("CdrLocal {}", i), name(&t.local_names, i)),
+            Op::AddImm(k) => (format!("AddImm {}", k), String::new()),
+            Op::SubImm(k) => (format!("SubImm {}", k), String::new()),
             Op::Slide(n) => (format!("Slide {}", n), String::new()),
             Op::MakeClosure(k) => {
                 let r = constant(k).as_ref().unwrap();

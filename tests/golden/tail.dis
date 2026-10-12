@@ -4,18 +4,15 @@ template top-level
    2  Return
 template loop  arity 2
    0  LocalRef 0       ; n
-   1  Fixnum 0
-   2  JumpIfNot NumEq →5
-   3  LocalRef 1       ; acc
-   4  Return
-   5  GlobalRef k0     ; loop
-   6  LocalRef 0       ; n
-   7  Fixnum 1
-   8  Sub
-   9  LocalRef 1       ; acc
-  10  Fixnum 1
-  11  Add
-  12  TailCall 2
+   1  JumpIfNotImm NumEq 0 →4
+   2  LocalRef 1       ; acc
+   3  Return
+   4  GlobalRef k0     ; loop
+   5  LocalRef 0       ; n
+   6  SubImm 1
+   7  LocalRef 1       ; acc
+   8  AddImm 1
+   9  TailCall 2
 template top-level
    0  MakeClosure k0   ; #<template f>
    1  GlobalDefine k1  ; f

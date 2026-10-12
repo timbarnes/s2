@@ -119,7 +119,7 @@ impl<'h> Gen<'h> {
     fn patch(&mut self, at: usize) {
         let here = self.code.len() as u32;
         match &mut self.code[at] {
-            Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfNot(_, t) => *t = here,
+            Op::Jump(t) | Op::JumpIfFalse(t) | Op::JumpIfNot(_, t) | Op::JumpIfNotImm(_, _, t) => *t = here,
             op => unreachable!("patching {:?}", op),
         }
     }
@@ -232,15 +232,36 @@ impl<'h> Gen<'h> {
                 self.ret(tail);
             }
             Expr::If(test, then, els) => {
-                let to_else = match self.fused_test(test) {
-                    Some((t, args)) => {
+                // `(if (not x) a b)` is `(if x b a)`.
+                let (mut test, mut then, mut els) = (&**test, then, els);
+                while let Expr::Call(f, args) = test
+                    && let Expr::GlobalRef(cell) = **f
+                    && let Some(Op::Not) = self.inlinable(cell, args.len())
+                {
+                    test = &args[0];
+                    (then, els) = (els, then);
+                }
+                // A comparison with a small constant.
+                let imm = match self.fused_test(test) {
+                    Some((t, [a, Expr::Const(k)])) if t.arity() == 2 && t != Test::EqP => {
+                        k.as_fixnum().and_then(|k| i16::try_from(k).ok()).map(|k| (t, a, k))
+                    }
+                    _ => None,
+                };
+                let to_else = match (imm, self.fused_test(test)) {
+                    (Some((t, a, k)), _) => {
+                        self.expr(a, false);
+                        self.depth -= 1;
+                        self.emit(Op::JumpIfNotImm(t, k, 0))
+                    }
+                    (None, Some((t, args))) => {
                         for a in args {
                             self.expr(a, false);
                         }
                         self.depth -= args.len();
                         self.emit(Op::JumpIfNot(t, 0))
                     }
-                    None => {
+                    (None, None) => {
                         self.expr(test, false);
                         self.depth -= 1;
                         self.emit(Op::JumpIfFalse(0))
@@ -296,6 +317,9 @@ impl<'h> Gen<'h> {
                     _ => None,
                 };
                 if let Some(op) = inline {
+                    if self.superinstruction(op, args, tail).is_some() {
+                        return;
+                    }
                     for a in args {
                         self.expr(a, false);
                     }
@@ -346,6 +370,40 @@ impl<'h> Gen<'h> {
                 self.end_scope(body, tail, bindings.len());
             }
         }
+    }
+
+    /// Compile the inlined call `op` of `args` as a superinstruction, if it
+    /// is one: `car` or `cdr` of an unboxed local, or adding or
+    /// subtracting a constant.
+    fn superinstruction(&mut self, op: Op, args: &[Expr], tail: bool) -> Option<()> {
+        let small = |e: &Expr| match e {
+            Expr::Const(k) => k.as_fixnum().and_then(|k| i32::try_from(k).ok()),
+            _ => None,
+        };
+        match (op, args) {
+            (Op::Car | Op::Cdr, [Expr::LocalRef(id)]) if !self.boxed.contains(id) => {
+                let Loc::Local(i) = self.locs[id] else { return None };
+                self.emit(if matches!(op, Op::Car) { Op::CarLocal(i) } else { Op::CdrLocal(i) });
+                self.depth += 1;
+            }
+            (Op::Add, [a, b]) => {
+                let (k, a) = match (small(b), small(a)) {
+                    (Some(k), _) => (k, a),
+                    (None, Some(k)) => (k, b),
+                    _ => return None,
+                };
+                self.expr(a, false);
+                self.emit(Op::AddImm(k));
+            }
+            (Op::Sub, [a, b]) => {
+                let k = small(b)?;
+                self.expr(a, false);
+                self.emit(Op::SubImm(k));
+            }
+            _ => return None,
+        }
+        self.ret(tail);
+        Some(())
     }
 
     /// The test and arguments of an `if` test that is an inlinable

@@ -11,6 +11,5 @@ template f  arity 1
    2  JumpIfFalse →5
    3  LocalRef 1       ; temp
    4  Return
-   5  LocalRef 0       ; x
-   6  Car
-   7  Return
+   5  CarLocal 0       ; x
+   6  Return

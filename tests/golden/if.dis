@@ -4,14 +4,12 @@ template top-level
    2  Return
 template top-level
    0  GlobalRef k0     ; x
-   1  Fixnum 20
-   2  JumpIfNot Lt →7
-   3  GlobalRef k0     ; x
-   4  Fixnum 1
-   5  Add
+   1  JumpIfNotImm Lt 20 →5
+   2  GlobalRef k0     ; x
+   3  AddImm 1
+   4  Return
+   5  Fixnum 0
    6  Return
-   7  Fixnum 0
-   8  Return
 template top-level
    0  False
    1  JumpIfFalse →4

@@ -691,3 +691,20 @@
 (test-equal "vector-set!: index must be a non-negative integer, got -1"
     (guard (e (#t (error-object-message e))) (vector-set! (vector 1) -1 0))
     "inlined vector-set! falls back to the builtin's error")
+
+;; The superinstructions: a constant added, subtracted or compared, and
+;; car and cdr of a local, with their slow paths.
+(define (with-constants x) (list (+ x 1) (+ 2 x) (- x 3) (< x 5) (= x 0) (>= x -2)))
+(test-equal '(1 2 -3 #t #t #t) (with-constants 0) "constants: fixnums")
+(test-equal '(1.5 2.5 -2.5 #t #f #t) (with-constants 0.5) "constants: a flonum")
+(test-equal '(140737488355328 140737488355329 140737488355324 #f #f #t)
+    (with-constants 140737488355327) "constants: overflow to a bignum")
+(test-equal '(3/2 5/2 -5/2 #t #f #t) (with-constants 1/2) "constants: a ratio")
+(test-equal '(#f #f #f) (cdddr (with-constants +nan.0)) "constants: NaN compares false")
+(test-equal "+: expected a number, got a"
+    (guard (e (#t (error-object-message e))) (with-constants 'a)) "constants: the builtin's error")
+(test-equal '(no yes) (map (lambda (x) (if (not (< x 3)) 'yes 'no)) '(1 5)) "(if (not x) a b)")
+(define (first-two l) (list (car l) (car (cdr l))))
+(test-equal '(1 2) (first-two '(1 2 3)) "car of a local")
+(test-equal "car: expected a pair, got 5"
+    (guard (e (#t (error-object-message e))) (first-two 5)) "car of a local: the builtin's error")

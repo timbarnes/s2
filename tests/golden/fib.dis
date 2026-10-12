@@ -4,19 +4,16 @@ template top-level
    2  Return
 template fib  arity 1
    0  LocalRef 0       ; n
-   1  Fixnum 2
-   2  JumpIfNot Lt →5
-   3  LocalRef 0       ; n
-   4  Return
-   5  GlobalRef k0     ; fib
-   6  LocalRef 0       ; n
-   7  Fixnum 1
-   8  Sub
-   9  Call 1
-  10  GlobalRef k0     ; fib
-  11  LocalRef 0       ; n
-  12  Fixnum 2
-  13  Sub
-  14  Call 1
-  15  Add
-  16  Return
+   1  JumpIfNotImm Lt 2 →4
+   2  LocalRef 0       ; n
+   3  Return
+   4  GlobalRef k0     ; fib
+   5  LocalRef 0       ; n
+   6  SubImm 1
+   7  Call 1
+   8  GlobalRef k0     ; fib
+   9  LocalRef 0       ; n
+  10  SubImm 2
+  11  Call 1
+  12  Add
+  13  Return
