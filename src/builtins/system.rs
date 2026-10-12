@@ -53,10 +53,12 @@ pub static PRIMITIVES: &[Primitive] = &[
     // Jiffies are nanoseconds since s2 started.
     prim("current-jiffy", 0, Some(0), |h, _| Ok(h.integer(START.elapsed().as_nanos().into()))),
     prim("jiffies-per-second", 0, Some(0), |_, _| Ok(Value::fixnum(1_000_000_000).unwrap())),
-    // (%exit [obj]): end the process now, with standard output flushed.
-    // #t or no argument is success (0), #f failure (1), an integer itself.
-    prim("%exit", 0, Some(1), |_, a| {
+    // (%exit [obj]): end the process now, with standard output and file
+    // ports flushed. #t or no argument is success (0), #f failure (1), an
+    // integer itself.
+    prim("%exit", 0, Some(1), |h, a| {
         let code = exit_status(a.first().copied())?;
+        h.flush_ports();
         std::io::stdout().flush().ok();
         std::process::exit(code)
     }),

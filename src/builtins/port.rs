@@ -368,7 +368,7 @@ fn open_output(heap: &mut Heap, name: Value, binary: bool) -> Result<Value, Erro
     let file_name = name;
     let name = string_arg(name, who)?.borrow().to_string();
     let file = std::fs::File::create(&name).map_err(|e| file_error(format!("{}: could not open file: {}", who, e), file_name))?;
-    Ok(heap.port(PortKind::FileOutput { name, file, binary }))
+    Ok(heap.port(PortKind::FileOutput { name, file: std::io::BufWriter::new(file), binary }))
 }
 
 /// Close a port (closing an output file), after checking it is the right

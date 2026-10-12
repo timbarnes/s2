@@ -202,3 +202,20 @@ fn library_files_are_cached_until_they_change() {
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_file(&program).ok();
 }
+
+#[test]
+fn unclosed_file_output_is_written_however_the_program_ends() {
+    // File output is buffered; the buffer must reach the file even when the
+    // port is never closed.
+    for (name, ending, status) in [("end", "", 0), ("exit", "(exit 3)", 3), ("emergency", "(emergency-exit 4)", 4), ("error", "(car '())", 70)] {
+        let out = std::env::temp_dir().join(format!("s2-unclosed-{}-{}.txt", std::process::id(), name));
+        let program = script(
+            &format!("unclosed-{}", name),
+            &format!("(define p (open-output-file {:?})) (write-string \"kept\" p) (write-char #\\! p) {}", out.to_str().unwrap(), ending),
+        );
+        assert_eq!(s2(&[program.to_str().unwrap()]).status.code(), Some(status), "{}", name);
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "kept!", "{}", name);
+        std::fs::remove_file(&out).ok();
+        std::fs::remove_file(&program).ok();
+    }
+}

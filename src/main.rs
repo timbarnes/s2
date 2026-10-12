@@ -253,7 +253,7 @@ impl Session {
         if fasl::is_fasl(&bytes) {
             if let Err(msg) = self.run_compiled(&bytes) {
                 self.report(&msg);
-                std::process::exit(EXIT_ERROR);
+                self.exit(EXIT_ERROR);
             }
         } else {
             let mut port = io::new_string_port_input(&program_text(bytes));
@@ -265,14 +265,20 @@ impl Session {
                 };
                 if let Err(msg) = result {
                     self.report(&msg);
-                    std::process::exit(EXIT_ERROR);
+                    self.exit(EXIT_ERROR);
                 }
             }
         }
+        self.exit(0)
+    }
+
+    /// End the process, with its output written.
+    fn exit(&self, code: i32) -> ! {
+        self.heap.flush_ports();
         std::io::stdout().flush().ok();
         #[cfg(feature = "stats")]
         vm::stats::report();
-        std::process::exit(0)
+        std::process::exit(code)
     }
 
     /// Run a compiled program: load it, loading the libraries it needs
@@ -407,10 +413,7 @@ fn run_main() {
         [file, ..] if !file.starts_with('-') => session.run_program(&args),
         _ => usage(),
     };
-    std::io::stdout().flush().ok();
-    #[cfg(feature = "stats")]
-    vm::stats::report();
-    std::process::exit(if ok { 0 } else { 1 });
+    session.exit(if ok { 0 } else { 1 });
 }
 
 #[cfg(test)]

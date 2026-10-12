@@ -6,7 +6,7 @@
 //! closing the port (or collecting it) closes the file.
 
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, BufWriter, Read, Write};
 
 use std::cell::Cell;
 
@@ -52,13 +52,14 @@ pub enum PortKind {
         /// The bytes written so far.
         bytes: Vec<u8>,
     },
-    /// Output to a file, textual or binary. Writes go straight to the
-    /// file, unbuffered, so nothing is lost if the program exits without
-    /// closing the port.
+    /// Output to a file, textual or binary, buffered. The buffer is
+    /// written when the port is flushed, closed or collected, and before
+    /// s2 exits (`Heap::flush_ports`), so nothing is lost if a program
+    /// exits without closing it.
     FileOutput {
         /// The file name, for printing the port.
         name: String,
-        file: File,
+        file: BufWriter<File>,
         /// Whether it is a binary port.
         binary: bool,
     },

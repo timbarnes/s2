@@ -243,6 +243,19 @@ impl Heap {
         self.live_after_gc = self.objects.len();
     }
 
+    /// Write out every file output port's buffer: before the process
+    /// exits, which runs no destructors.
+    pub fn flush_ports(&self) {
+        for r in &self.objects {
+            if let Obj::Port(port) = &r.get().kind
+                && let Ok(mut port) = port.try_borrow_mut()
+                && let PortKind::FileOutput { file, .. } = &mut *port
+            {
+                std::io::Write::flush(file).ok();
+            }
+        }
+    }
+
     pub fn cons(&mut self, car: Value, cdr: Value) -> Value {
         self.alloc(Obj::Pair { car: Cell::new(car), cdr: Cell::new(cdr) })
     }
