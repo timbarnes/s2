@@ -429,6 +429,16 @@ pub static PRIMITIVES: &[Primitive] = &[
         let fields = template_fields(a)?;
         Ok(Value::obj(make_template(h, fields)?))
     }),
+    // (%inline-instruction cell argc): the instruction a call to the global
+    // variable `cell` with `argc` arguments is inlined as, or #f.
+    prim("%inline-instruction", 2, Some(2), |h, a| {
+        let cell = cell(a[0]).map_err(Error::from)?;
+        let argc = a[1].as_fixnum().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| err!("%inline-instruction: bad argument count: {}", print_value(a[1])))?;
+        Ok(match crate::compile::codegen::inline_op(h, cell, argc) {
+            Some(op) => op_to_datum(h, op),
+            None => Value::FALSE,
+        })
+    }),
     // The inverse, for checking: (%template-instructions t) is t's code as data.
     prim("%template-instructions", 1, Some(1), |h, a| {
         let Some(Obj::Template(t)) = kind(a[0]) else { return Err(err!("%template-instructions: not a template: {}", print_value(a[0]))) };

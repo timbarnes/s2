@@ -54,6 +54,12 @@ impl Stack {
         self.high
     }
 
+    /// Start measuring `high` again from here.
+    #[cfg(test)]
+    pub fn reset_high(&mut self) {
+        self.high = self.len;
+    }
+
     pub fn set_len(&mut self, len: usize) {
         assert!(len <= self.size, "stack overflow");
         self.len = len;

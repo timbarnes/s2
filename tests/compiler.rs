@@ -83,10 +83,13 @@ fn corpus() -> Vec<(String, String, bool)> {
 /// Compile `text` with the compiler `compiler`, with `--expand --dis`, or
 /// run it if `run`, and return what it printed and its status, as text,
 /// and the compiled file.
-fn compile(compiler: &str, name: &str, text: &str, run: bool, env: &[(&str, &str)]) -> (String, Vec<u8>) {
+fn compile(test: &str, compiler: &str, name: &str, text: &str, run: bool, env: &[(&str, &str)]) -> (String, Vec<u8>) {
     let tag = name.replace(['/', ' '], "_");
     let dir = std::env::temp_dir();
-    let src = dir.join(format!("s2-oracle-{}-{}-{}.scm", std::process::id(), compiler, tag));
+    // The tests run in parallel in one process, so each names its files
+    // (`test`). A compiled file records its source's path, so compiling one
+    // file twice uses the same path.
+    let src = dir.join(format!("s2-oracle-{}-{}-{}-{}.scm", std::process::id(), test, compiler, tag));
     let out = src.with_extension("s2o");
     std::fs::write(&src, text).unwrap();
     // A compiled file records its source's modification time: the same
@@ -127,17 +130,28 @@ fn first_difference(a: &str, b: &str) -> String {
     )
 }
 
-#[test]
-fn the_round_trip_compiles_as_the_rust_compiler_does() {
+/// Every corpus file, compiled by the Rust compiler and by `compiler`,
+/// prints the same.
+fn compiles_as_the_rust_compiler_does(compiler: &str) {
     let mut failures = Vec::new();
     for (name, text, run) in corpus() {
-        let (rust, _) = compile("rust", &name, &text, run, &[]);
-        let (other, _) = compile("roundtrip", &name, &text, run, &[]);
+        let (rust, _) = compile(compiler, "rust", &name, &text, run, &[]);
+        let (other, _) = compile(compiler, compiler, &name, &text, run, &[]);
         if rust != other {
             failures.push(format!("{}: {}", name, first_difference(&rust, &other)));
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+}
+
+#[test]
+fn the_round_trip_compiles_as_the_rust_compiler_does() {
+    compiles_as_the_rust_compiler_does("roundtrip");
+}
+
+#[test]
+fn the_scheme_compiler_compiles_as_the_rust_compiler_does() {
+    compiles_as_the_rust_compiler_does("scheme");
 }
 
 /// A library with what a compiled file must record: variables, a macro,
@@ -159,8 +173,8 @@ const LIBRARY: &str = "
 #[test]
 fn compiled_files_are_reproducible() {
     for (name, text) in [("library", LIBRARY.to_string()), ("core", std::fs::read_to_string(root().join("scheme/core.scm")).unwrap())] {
-        let (_, plain) = compile("rust", name, &text, false, &[]);
-        let (_, stressed) = compile("rust", name, &text, false, &[("S2_GC_STRESS", "1"), ("S2_GC_POISON", "1")]);
+        let (_, plain) = compile("repro", "rust", name, &text, false, &[]);
+        let (_, stressed) = compile("repro", "rust", name, &text, false, &[("S2_GC_STRESS", "1"), ("S2_GC_POISON", "1")]);
         assert!(!plain.is_empty(), "{}: nothing written", name);
         assert!(plain == stressed, "{}: compiling twice gave different bytes", name);
     }

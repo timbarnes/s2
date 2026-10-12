@@ -171,6 +171,12 @@ pub struct Heap {
 }
 
 impl Heap {
+    /// The number of objects on the heap, live or not yet collected.
+    #[cfg(test)]
+    pub fn object_count(&self) -> usize {
+        self.objects.len()
+    }
+
     pub fn new() -> Heap {
         Heap {
             objects: Vec::new(),

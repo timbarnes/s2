@@ -293,13 +293,16 @@ syntax error from `eval`. R7RS allows that, and it is arguably better.
 - `libraries.scm`
 - `driver.scm`
 
-The files load into the system environment after `core.scm`, so they can
-use its macros. Their internal names are `%`-prefixed. `(s2)` exports the
-system environment's other names, `%` ones included (47 of its 53 today),
-so it should start leaving `%` names out, or the compiler's hundreds of
-internal names become part of it. Making them a library, `(s2 compiler)`, would
+**Changed in P13.1: the files are the body of a library, `(s2
+compiler)`,** which exports only what Rust calls. The proposal was
+`%`-prefixed names in the system environment, because a library would
 need the library machinery running before the compiler that implements
-it, so that waits until after P13.
+it. That isn't so: the compiler loads from a compiled image, and loading
+a compiled library runs no compiler. As a library, its internal names
+stay private, the files read as ordinary Scheme, and `(s2)` doesn't grow.
+Rust wraps the files in the `define-library` (`compiler_source` in
+`main.rs`), since the files are built into the binary, where `include`
+couldn't find them.
 
 ### C11. Hash tables
 
@@ -323,8 +326,8 @@ chibi's suite at 1154.
 | Phase | Builds | Exit test |
 |---|---|---|
 | P13.0 | Groundwork | Both compilers selectable; the diff harness runs |
-| P13.1 | Codegen in Scheme | Identical `--dis` over the corpus |
-| P13.2 | Analysis in Scheme | Identical `--dis` over the corpus |
+| P13.1 | Codegen and analysis in Scheme | Identical `--dis` over the corpus |
+| P13.2 | (folded into P13.1) | |
 | P13.3 | The front end in Scheme: `syntax-rules`, the expander, library declarations | Identical `--expand` and `--dis`; `pending_load` gone |
 | P13.4 | The driver: every compile through Scheme; `eval` and loading in Scheme | All tests with `S2_COMPILER=scheme` |
 | P13.5 | Self-compilation and the image | The fixed point |
@@ -348,24 +351,30 @@ chibi's suite at 1154.
 - **Exit:** the round trip Rust AST to vector and back gives identical
   `--dis` over the corpus; compiling a file twice gives identical bytes.
 
-### P13.1. Codegen in Scheme
+### P13.1. Codegen and analysis in Scheme
+
+**Changed in P13.1: this includes analysis**, which was P13.2. The
+Scheme codegen needs free variables, boxes and lambda groups. Reaching
+the Rust analysis from Scheme would have needed primitives written only
+to be thrown away a sub-phase later, and analysis is under 200 lines.
 
 - `ast.scm` and `codegen.scm`: slots and depth, closures, `letrec`
   lambda groups, tail calls, inlining (whether a global is inlinable is
   asked of Rust through a primitive), superinstructions, and the
   constant pool.
-- The Rust front end and analysis feed the Scheme codegen, through
-  P13.0's converter.
+- `analyze.scm`: free variables in first-reference order (codegen
+  depends on it), boxed variables and lambda groups.
+- The Rust front end feeds the Scheme codegen, through P13.0's
+  converter.
+- The Scheme codegen runs where the VM can call it: the REPL, `-e`,
+  `-f`, programs and `--compile`. Library files and `eval` compile inside
+  a primitive (constraint 1), so they keep the Rust codegen until P13.4.
 - How the Scheme compiler is loaded: compiled by the Rust compiler at
   startup and cached as an image next to `s2-core.s2o` (C5).
 - **Exit:** identical `--dis` over the corpus with `S2_COMPILER=scheme`.
   **Measure** compile time, as the first figure for P13.6.
 
-### P13.2. Analysis in Scheme
-
-- `analyze.scm`: free variables in first-reference order (codegen
-  depends on it), boxed variables and lambda groups.
-- **Exit:** as P13.1. The whole back end is now Scheme.
+### P13.2. (Folded into P13.1)
 
 ### P13.3. The front end in Scheme
 

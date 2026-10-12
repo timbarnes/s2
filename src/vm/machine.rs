@@ -229,6 +229,12 @@ impl Vm {
         (self.stack.high(), self.frames.capacity())
     }
 
+    /// Start measuring the value stack's high water again.
+    #[cfg(test)]
+    pub fn reset_high_water(&mut self) {
+        self.stack.reset_high();
+    }
+
     /// Replace the value stack with one of `size` values, for tests of
     /// overflow.
     #[cfg(test)]
@@ -262,6 +268,18 @@ impl Vm {
             self.frames.clear();
         }
         result
+    }
+
+    /// Call the procedure `f` with `args`, at the top level, as `run` runs
+    /// a form: how Rust calls Scheme (the compiler in Scheme, plan/08 C6).
+    /// Not from inside a primitive: the VM isn't re-entrant.
+    pub fn call(&mut self, heap: &mut Heap, f: Value, args: &[Value]) -> Result<Value, String> {
+        let n = args.len();
+        let consts: Vec<Value> = std::iter::once(f).chain(args.iter().copied()).collect();
+        let code = (0..=n as u32).map(Op::Const).chain([Op::TailCall(n as u16)]).collect();
+        let t = Template { name: "top-level".into(), required: 0, rest: false, nfree: 0, code, consts, local_names: Vec::new(), free_names: Vec::new() };
+        let t = heap.template(t);
+        self.run(heap, t)
     }
 
     /// Start raising the error `e` in the frame `here`: the handler to run

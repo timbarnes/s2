@@ -29,6 +29,21 @@ use crate::value::Value;
 use crate::vm::op::Test;
 use crate::vm::{Op, Template};
 
+/// The inlined instruction for a call to the global `cell` with `argc`
+/// arguments, if it is one: `cell` must be the system environment's
+/// binding of a standard procedure that has one. Those cells never change
+/// (user code can't assign an imported name, and a `define` of one makes a
+/// new cell), so the inlined code means exactly what the call does.
+pub fn inline_op(heap: &Heap, cell: GcRef, argc: usize) -> Option<Op> {
+    let Some(Obj::Primitive(p)) = cell_value(cell).get().as_obj().map(|o| &o.kind) else { return None };
+    let name = cell_name(cell).as_ref()?;
+    let system = env_of(heap.system?).borrow().lookup(name);
+    if system != Some(TopBinding::Variable(cell)) {
+        return None;
+    }
+    Op::inline(p.name, argc)
+}
+
 /// Compile a top-level form into a template of no arguments.
 pub fn codegen(heap: &mut Heap, e: &Expr) -> GcRef {
     let boxed = boxed_variables(e);
@@ -442,19 +457,9 @@ impl<'h> Gen<'h> {
     }
 
     /// The inlined instruction for a call to the global `cell` with `argc`
-    /// arguments, if it is one: `cell` must be the system environment's
-    /// binding of a standard procedure that has one. Those cells never
-    /// change (user code can't assign an imported name, and a `define` of
-    /// one makes a new cell), so the inlined code means exactly what the
-    /// call does.
+    /// arguments, if it is one (`inline_op`).
     fn inlinable(&self, cell: GcRef, argc: usize) -> Option<Op> {
-        let Some(Obj::Primitive(p)) = cell_value(cell).get().as_obj().map(|o| &o.kind) else { return None };
-        let name = cell_name(cell).as_ref()?;
-        let system = env_of(self.heap.system?).borrow().lookup(name);
-        if system != Some(TopBinding::Variable(cell)) {
-            return None;
-        }
-        Op::inline(p.name, argc)
+        inline_op(self.heap, cell, argc)
     }
 
     /// Compile an inner lambda into its own template. `free` lists its free

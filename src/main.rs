@@ -58,6 +58,22 @@ use value::Value;
 /// macros, compiled into the binary and loaded into every session.
 const CORE_SCM: &str = include_str!("../scheme/core.scm");
 
+/// The compiler in Scheme (plan/08), as the library `(s2 compiler)`: its
+/// files, in order, form the library's body.
+const COMPILER_FILES: &[&str] = &[
+    include_str!("../scheme/compiler/ast.scm"),
+    include_str!("../scheme/compiler/analyze.scm"),
+    include_str!("../scheme/compiler/codegen.scm"),
+];
+
+/// `(s2 compiler)`'s source: a `define-library` around `COMPILER_FILES`.
+fn compiler_source() -> String {
+    format!(
+        "(define-library (s2 compiler) (export codegen) (import (scheme base) (scheme cxr) (scheme write) (s2)) (begin {}))",
+        COMPILER_FILES.join("\n")
+    )
+}
+
 /// The heap, the VM, and the environment forms are compiled for.
 struct Session {
     heap: Heap,
@@ -67,6 +83,8 @@ struct Session {
     vm: vm::Vm,
     dis: bool,
     expand: bool,
+    /// The code generator in Scheme, with `S2_COMPILER=scheme`.
+    codegen: Option<Value>,
 }
 
 impl Session {
@@ -78,9 +96,13 @@ impl Session {
         heap.system = Some(system);
         heap.interaction = Some(system);
         let vm = vm::Vm::new(&mut heap);
-        let mut s = Session { heap, env: system, vm, dis: false, expand: false };
-        s.load_core();
+        let mut s = Session { heap, env: system, vm, dis: false, expand: false, codegen: None };
+        s.load_image(CORE_SCM, "s2-core.s2o");
         libraries::register_standard_libraries(&mut s.heap, system);
+        if compile::compiler() == compile::Compiler::Scheme {
+            s.load_image(&compiler_source(), "s2-compiler.s2o");
+            s.codegen = Some(s.library_procedure(&["s2", "compiler"], "codegen"));
+        }
         // The interaction environment: every system binding, imported
         // (globals.rs).
         let mut interaction = Env::empty(true);
@@ -93,20 +115,21 @@ impl Session {
         s
     }
 
-    /// Load `scheme/core.scm` into the system environment: from its
-    /// compiled image, cached next to the executable, if that is fresh;
-    /// otherwise compile and run it form by form, and write the image for
-    /// next time (plan/04 P11).
-    fn load_core(&mut self) {
-        let system = self.env;
-        let image = std::env::current_exe().map(|exe| exe.with_file_name("s2-core.s2o")).ok();
+    /// Load Scheme source built into s2 (`scheme/core.scm`, the compiler)
+    /// into the system environment: from its compiled image, cached next to
+    /// the executable as `image_name`, if that is fresh; otherwise compile
+    /// and run it form by form, and write the image for next time (plan/04
+    /// P11).
+    fn load_image(&mut self, source: &str, image_name: &str) {
+        let system = self.heap.system.unwrap();
+        let image = std::env::current_exe().map(|exe| exe.with_file_name(image_name)).ok();
         let cached = image.as_deref().and_then(|p| fasl::read_cached(&mut self.heap, system, p).ok().flatten());
         let result = match cached {
             Some(templates) => self.run_templates(&templates),
             None => {
                 env_of(system).borrow_mut().touched = Some(Vec::new());
                 let mut templates = Vec::new();
-                let mut port = io::new_string_port_input(CORE_SCM);
+                let mut port = io::new_string_port_input(source);
                 let pinned = self.heap.pinned.len();
                 let mut result = Ok(());
                 while let Ok(datum) = parse(&mut self.heap, &mut port) {
@@ -131,7 +154,18 @@ impl Session {
             }
         };
         if let Err(e) = result {
-            panic!("scheme/core.scm: {}", e);
+            panic!("{}: {}", image_name, e);
+        }
+    }
+
+    /// The procedure the library `library` exports as `name`.
+    fn library_procedure(&mut self, library: &[&str], name: &str) -> Value {
+        let library: libraries::LibraryName = library.iter().map(|p| p.to_string()).collect();
+        let name = self.heap.intern(name).as_ref().unwrap();
+        let exports = &self.heap.libraries.get(&library).expect("library not loaded").exports;
+        match exports.iter().find(|&&(n, _)| n == name) {
+            Some(&(_, globals::TopBinding::Variable(cell))) => globals::cell_value(cell).get(),
+            _ => panic!("{:?} doesn't export {}", library, printer::print_value(Value::obj(name))),
         }
     }
 
@@ -172,21 +206,34 @@ impl Session {
     }
 
     fn run(&mut self, ast: &compile::ast::Expr) -> Result<Value, String> {
-        let template = self.generate(ast);
+        let template = self.generate(ast)?;
         self.vm.run(&mut self.heap, template)
     }
 
     /// Generate a form's code, printing its AST and code for `--expand`
-    /// and `--dis`.
-    fn generate(&mut self, ast: &compile::ast::Expr) -> GcRef {
+    /// and `--dis`: with the Scheme code generator if `S2_COMPILER` chose
+    /// it, else in Rust.
+    fn generate(&mut self, ast: &compile::ast::Expr) -> Result<GcRef, String> {
         if self.expand {
             io::write_stdout(&self.heap, &format!("{}\n", compile::ast::show(ast)));
         }
-        let template = compile::generate(&mut self.heap, ast);
+        let template = match self.codegen {
+            Some(codegen) => {
+                // The AST's data form holds everything the AST refers to,
+                // so the call keeps it alive through any collection.
+                let datum = compile::data::expr_to_datum(&mut self.heap, ast);
+                let t = self.vm.call(&mut self.heap, codegen, &[datum])?;
+                match t.as_obj().map(|o| &o.kind) {
+                    Some(heap::Obj::Template(_)) => t.as_ref().unwrap(),
+                    _ => return Err(format!("the Scheme code generator returned {}", printer::print_value(t))),
+                }
+            }
+            None => compile::generate(&mut self.heap, ast),
+        };
         if self.dis {
             io::write_stdout(&self.heap, &compile::disasm::disassemble(template));
         }
-        template
+        Ok(template)
     }
 
     /// `(%load-library "path")`, written in Scheme (scheme/core.scm).
@@ -323,7 +370,10 @@ impl Session {
             };
             match self.expand(datum) {
                 Ok(ast) => {
-                    let t = self.generate(&ast);
+                    let t = match self.generate(&ast) {
+                        Ok(t) => t,
+                        Err(e) => break Err(e),
+                    };
                     self.heap.pinned.push(Value::obj(t));
                     templates.push(t);
                     // A library the program defines is registered now, so the
@@ -901,17 +951,29 @@ mod tests {
 
     #[test]
     fn tail_calls_run_in_constant_space() {
-        let mut s = Session::new();
-        let mut port = io::new_string_port_input(
-            "(define (loop n) (if (= n 0) (%frame-depth) (loop (- n 1)))) (loop 1000000)",
-        );
-        let mut last = Value::UNSPECIFIED;
-        while let Ok(datum) = parse(&mut s.heap, &mut port) {
-            last = s.eval(datum).unwrap();
+        // The stack goes as deep for a million iterations as for ten. (The
+        // compiler in Scheme runs on the same stack, compiling each form,
+        // so the depth itself isn't the measure.)
+        fn eval(s: &mut Session, src: &str) -> Value {
+            let mut port = io::new_string_port_input(src);
+            let mut last = Value::UNSPECIFIED;
+            while let Ok(datum) = parse(&mut s.heap, &mut port) {
+                last = s.eval(datum).unwrap();
+            }
+            last
         }
-        assert_eq!(last.as_fixnum(), Some(0));
-        let (stack, frames) = s.vm.high_water();
-        assert!(stack < 64 && frames < 64, "stack {} frames {}", stack, frames);
+        let mut s = Session::new();
+        eval(&mut s, "(define (loop n) (if (= n 0) (%frame-depth) (loop (- n 1))))");
+        let mut deepest = Vec::new();
+        for n in [10, 1_000_000] {
+            s.vm.reset_high_water();
+            assert_eq!(eval(&mut s, &format!("(loop {})", n)).as_fixnum(), Some(0));
+            deepest.push(s.vm.high_water());
+        }
+        let (stack, frames) = (deepest[0].0, deepest[1].1);
+        assert_eq!(deepest[0].0, deepest[1].0, "stack {:?}", deepest);
+        // The frame stack's capacity never shrinks: a million frames would show.
+        assert!(stack < 10_000 && frames < 10_000, "stack {} frames {}", stack, frames);
         // A non-tail call does grow the frame stack.
         check("(define (deep n) (if (= n 0) (%frame-depth) (+ 0 (deep (- n 1))))) (deep 100)", &["deep", "100"]);
     }
@@ -967,14 +1029,19 @@ mod tests {
         // multiple of the allocation; a fixed collection interval would
         // re-mark the growing heap every interval (3n here, quadratic in
         // general).
+        //
+        // Every collection also marks what was live at startup, which is
+        // larger with the compiler in Scheme loaded; that part is left out.
         let n = 100_000;
+        let startup = Session::new().heap.object_count();
         let (s, last) = session_after(&format!(
             "(define (deep n) (let ((p (cons n '()))) (if (= n 0) 0 (+ (car p) (deep (- n 1)) (- 0 (car p)) 1)))) (deep {})",
             n
         ));
         assert_eq!(last.as_fixnum(), Some(n));
         assert!(s.heap.collections >= 2, "{} collections", s.heap.collections);
-        assert!(s.heap.marked < 2 * n as usize + 20_000, "{} marked", s.heap.marked);
+        let program = s.heap.marked.saturating_sub(s.heap.collections * startup);
+        assert!(program < 2 * n as usize + 20_000, "{} marked, {} of them for the program", s.heap.marked, program);
     }
 
     /// s1's `scheme/tail_tests.scm`: a loop
