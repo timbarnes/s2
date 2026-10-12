@@ -7,10 +7,10 @@ on one machine, an Apple M2 Max running macOS 27.0.1, with the scripts in
 In short:
 
 - **Performance.** Of these ten systems, only chibi and s1 are slower than
-  s2. Over the benchmarks both finish, chibi takes 2.9 times as long as s2, and s1
-  4.8 times. Gauche, the closest design to s2's, takes 0.55 of s2's time.
-  The native-code compilers (Chez, Gambit, Racket) take a twentieth to a
-  tenth.
+  s2. Over the benchmarks both finish, chibi takes 3.6 times as long as s2,
+  and s1 5.8 times. Gauche, the closest design to s2's, takes 0.68 of s2's
+  time. The native-code compilers (Chez, Gambit, Racket) take a fifteenth
+  to a ninth.
 - **Completeness.** s2 passes everything in chibi's R7RS suite that it
   reaches, as do the others. The one gap is complex numbers, which every
   other system has.
@@ -170,12 +170,12 @@ features that would make it practical rather than educational:
 
 ## Performance
 
-> **Since these measurements:** s2's values are now NaN-boxed, one 64-bit
-> word instead of a 16-byte enum (D2). That made s2 1.22 times faster on
-> 35 of these benchmarks (geometric mean, 1.12-1.42x each), with
-> `gcbench` and the small I/O benchmarks unchanged. Gauche's lead over s2
-> shrinks from about 1.8x to about 1.5x. The tables below are P12's, from
-> before the change.
+> **These tables were rerun on 2026-10-12**, after s2's values were
+> NaN-boxed (D2, commit ffbe13f). Against P12's run, s2 is 1.24 times
+> faster (geometric mean over 56 benchmarks; 1.00-1.60x each, none
+> slower), and every other system's times are within 3% of P12's. So
+> Gauche's lead over s2 fell from 1.8x to 1.5x, and s2's over chibi grew
+> from 2.9x to 3.6x.
 
 ecraven's [r7rs-benchmarks](https://github.com/ecraven/r7rs-benchmarks),
 57 programs, run by `bench/r7rs/run.sh`:
@@ -210,78 +210,78 @@ faster.
 
 | system | time relative to s2 | benchmarks |
 |---|---:|---:|
-| Chez | 0.054 (18x faster) | 56 |
-| Gambit | 0.063 (16x) | 56 |
-| Racket | 0.095 (11x) | 56 |
-| Guile | 0.148 (7x) | 55 |
-| s7 | 0.232 (4x) | 51 |
-| Chicken | 0.236 (4x) | 54 |
-| Gauche | 0.550 (2x) | 56 |
+| Chez | 0.066 (15x faster) | 56 |
+| Gambit | 0.077 (13x) | 56 |
+| Racket | 0.115 (9x) | 56 |
+| Guile | 0.184 (5x) | 55 |
+| s7 | 0.286 (3.5x) | 51 |
+| Chicken | 0.290 (3.4x) | 54 |
+| Gauche | 0.678 (1.5x) | 56 |
 | **s2** | **1** | 56 |
-| chibi | 2.89 (3x slower) | 50 |
-| s1 | 4.80 (5x slower) | 47 |
+| chibi | 3.61 (3.6x slower) | 50 |
+| s1 | 5.79 (5.8x slower) | 47 |
 
 **Medians, in seconds** (at a tenth of the suite's iteration counts):
 
 | benchmark | s2 | s1 | chibi | Guile | Gauche | s7 | Chicken | Gambit | Chez | Racket |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| browse | 3.089 | 23.682 | 75.780 | 0.289 | 1.303 | 0.917 | 0.662 | 0.096 | 0.081 | 0.189 |
-| deriv | 3.522 | 20.475 | 5.052 | 0.387 | 1.858 | 0.909 | 0.360 | 0.108 | 0.077 | 0.107 |
-| destruc | 3.662 | 23.731 | 5.183 | 0.212 | 1.528 | 0.691 | 0.695 | 0.160 | 0.116 | 0.193 |
-| diviter | 2.581 | 21.018 | 3.163 | 0.382 | 1.034 | 0.305 | 0.198 | 0.168 | 0.099 | 0.143 |
-| divrec | 2.968 | 23.546 | 2.974 | 0.616 | 1.381 | 0.485 | 0.485 | 0.181 | 0.122 | 0.178 |
-| puzzle | 6.617 | 36.777 | 14.959 | 0.464 | 2.013 | 0.779 | 1.071 | 0.190 | 0.163 | 0.202 |
-| triangl | 4.410 | 30.357 | 5.076 | 0.482 | 1.485 | 1.287 | 1.131 | 0.127 | 0.172 | 0.157 |
-| tak | 32.811 | TIMEOUT | 35.585 | 2.323 | 13.432 | 20.547 | 10.997 | 1.337 | 1.263 | 1.344 |
-| takl | 111.879 | TIMEOUT | TIMEOUT | 3.993 | 58.207 | 7.076 | 10.795 | 1.598 | 1.847 | 3.112 |
-| ntakl | 85.934 | TIMEOUT | 58.334 | 3.810 | 50.137 | 6.923 | 10.251 | 1.505 | 1.759 | 2.923 |
-| cpstak | 74.034 | TIMEOUT | 118.550 | 8.306 | 58.028 | 32.697 | 9.788 | 3.020 | 1.651 | 2.133 |
-| ctak | 25.003 | 48.718 | TIMEOUT | 42.016 | 12.650 | 8.660 | 2.254 | 1.709 | 0.429 | 1.287 |
-| fib | 11.937 | 79.029 | 9.278 | 0.989 | 5.400 | 0.858 | 4.997 | 0.388 | 0.486 | 0.514 |
-| fibc | 2.160 | 6.388 | 5.219 | 2.206 | 1.087 | 0.600 | 0.201 | 0.107 | 0.032 | 0.102 |
-| fibfp | 3.374 | 6.378 | 2.224 | 0.634 | 0.662 | 0.078 | 0.560 | 0.085 | 0.144 | 0.164 |
-| sum | 5.262 | 47.954 | 5.783 | 0.237 | 2.136 | 0.390 | 1.632 | 0.164 | 0.212 | 0.248 |
-| sumfp | 5.904 | 11.033 | 4.158 | 1.172 | 0.848 | 0.177 | 0.577 | 0.234 | 0.207 | 0.239 |
-| fft | 1.972 | 17.071 | 3.350 | 0.249 | 0.585 | 0.806 | 0.265 | 0.150 | 0.134 | 0.149 |
-| mbrot | 6.912 | 28.973 | 9.694 | 1.214 | 1.302 | 0.907 | 0.587 | 0.293 | 0.416 | 0.400 |
-| mbrotZ | ERROR | ERROR | 21.655 | 1.178 | 1.966 | 0.600 | 1.421 | 0.500 | 0.300 | 0.322 |
-| nucleic | 2.620 | 10.068 | 4.112 | 0.321 | 1.056 | 0.691 | 0.283 | 0.090 | 0.120 | 0.136 |
-| pi | 0.039 | 0.042 | 32.431 | 0.006 | 0.230 | ERROR | 0.036 | 0.043 | 0.031 | 0.042 |
-| pnpoly | 7.778 | 23.940 | 13.626 | 0.928 | 1.451 | 1.091 | 1.077 | 0.185 | 0.294 | 0.329 |
-| ray | 3.321 | 14.214 | 10.579 | 0.402 | 1.176 | 0.888 | 0.359 | 0.094 | 0.154 | 0.286 |
-| simplex | 4.917 | 51.162 | 10.379 | 0.395 | 2.200 | 1.957 | 0.608 | 0.099 | 0.138 | 0.168 |
-| ack | 26.639 | TIMEOUT | 22.304 | 3.462 | 26.689 | 3.717 | 11.822 | 0.858 | 0.753 | 1.081 |
-| array1 | 4.932 | 27.082 | 3.986 | 0.341 | 1.520 | 0.197 | 0.836 | 0.128 | 0.286 | 0.306 |
-| string | 0.054 | 0.063 | 0.476 | 0.013 | 0.077 | 0.017 | 0.025 | 0.043 | 0.077 | 0.116 |
-| sum1 | 0.105 | 0.164 | 3.809 | 0.273 | 0.065 | 0.016 | 0.712 | 0.029 | 0.043 | 0.725 |
-| cat | 2.072 | 57.608 | 3.484 | 0.979 | 0.868 | 0.067 | 1.755 | 0.170 | 0.196 | 0.416 |
-| tail | 0.239 | 0.925 | 0.539 | 0.405 | 0.342 | 0.034 | 0.219 | 0.190 | 0.199 | 0.213 |
-| wc | 2.473 | 17.139 | 23.250 | 0.601 | 1.236 | 0.393 | 0.839 | 0.104 | 0.093 | 0.250 |
-| read1 | 0.082 | 0.085 | 12.102 | 0.414 | 0.157 | 0.018 | 1.843 | 0.077 | 0.052 | 1.256 |
-| compiler | 2.222 | 15.541 | 5.883 | 0.253 | 1.461 | 1.185 | 0.388 | 0.213 | 0.105 | 0.157 |
-| conform | 5.223 | 28.377 | 7.852 | 0.436 | 2.670 | 2.454 | 0.782 | 0.190 | 0.123 | 0.309 |
-| dynamic | 2.267 | 13.700 | 13.329 | 0.397 | 1.117 | ERROR | TIMEOUT | 0.270 | 0.123 | 0.984 |
-| earley | 25.583 | TIMEOUT | TIMEOUT | 4.548 | 7.113 | 26.832 | 6.615 | 2.617 | 1.888 | 5.850 |
-| graphs | 29.676 | TIMEOUT | TIMEOUT | 2.215 | 18.529 | 17.977 | 2.652 | 2.364 | 0.436 | 0.592 |
-| lattice | 10.987 | 87.910 | 64.834 | 0.690 | 3.874 | 5.472 | 1.176 | 0.307 | 0.218 | 0.270 |
-| matrix | 3.732 | 28.320 | 11.816 | 0.295 | 2.012 | 1.688 | 0.487 | 0.112 | 0.075 | 0.104 |
-| maze | 1.958 | 15.147 | 4.527 | 0.175 | 1.176 | 0.909 | 0.415 | 0.036 | 0.054 | 0.064 |
-| mazefun | 3.517 | 17.471 | 5.888 | 0.341 | 2.192 | 0.780 | 0.863 | 0.144 | 0.130 | 0.189 |
-| nqueens | 8.160 | 99.082 | 9.494 | 0.672 | 4.459 | 2.149 | 1.912 | 0.396 | 0.343 | 0.395 |
-| paraffins | 0.946 | 8.274 | TIMEOUT | 0.434 | 1.149 | 0.291 | 1.077 | 0.364 | 0.332 | 0.624 |
-| parsing | 3.996 | 58.758 | 107.014 | 0.468 | 7.383 | 1.630 | 0.782 | 0.140 | 0.175 | 0.153 |
-| peval | 4.918 | 37.225 | 9.882 | 0.440 | 2.575 | INCORRECT | 0.661 | 0.143 | 0.128 | 0.185 |
-| primes | 1.278 | 9.823 | 1.168 | 0.211 | 0.809 | 0.294 | 0.318 | 0.060 | 0.055 | 0.085 |
-| quicksort | 5.042 | 35.211 | 16.180 | 0.569 | 2.582 | 4.109 | 1.076 | 0.274 | 0.263 | 0.728 |
-| scheme | 3.780 | 14.826 | 6.501 | 0.580 | 1.913 | INCORRECT | 1.030 | 0.280 | 0.149 | 0.260 |
-| slatex | 1.439 | 5.517 | 7.632 | 1.285 | 1.352 | 0.984 | 1.057 | 0.853 | 0.763 | 1.225 |
-| chudnovsky | 0.110 | 0.183 | 11.965 | 0.009 | 0.074 | ERROR | 0.020 | 0.019 | 0.013 | 0.020 |
-| nboyer | 22.642 | TIMEOUT | 21.779 | 2.108 | 8.472 | 17.011 | 6.417 | 1.929 | 1.197 | 3.153 |
-| sboyer | 23.724 | TIMEOUT | 22.434 | 1.857 | 9.852 | 15.334 | 3.964 | 0.732 | 0.569 | 0.900 |
-| gcbench | 36.802 | 83.124 | TIMEOUT | 1.034 | 12.774 | 7.562 | 3.026 | 4.452 | 0.483 | 1.018 |
-| mperm | 7.935 | 49.577 | 16.427 | 0.888 | 2.810 | 2.018 | 1.918 | 0.602 | 0.603 | 1.834 |
-| equal | 0.632 | 0.751 | 23.678 | TIMEOUT | 7.793 | 0.449 | TIMEOUT | 0.184 | 0.414 | 1.625 |
-| bv2string | 0.941 | 7.158 | 0.627 | 0.111 | 0.609 | 0.360 | 0.387 | 0.088 | 0.056 | 0.086 |
+| browse | 2.113 | 22.319 | 75.456 | 0.285 | 1.299 | 0.891 | 0.662 | 0.094 | 0.081 | 0.184 |
+| deriv | 2.545 | 19.083 | 4.960 | 0.381 | 1.824 | 0.896 | 0.354 | 0.105 | 0.074 | 0.101 |
+| destruc | 2.768 | 22.018 | 4.999 | 0.201 | 1.497 | 0.701 | 0.652 | 0.153 | 0.111 | 0.185 |
+| diviter | 2.021 | 19.857 | 2.995 | 0.361 | 0.976 | 0.292 | 0.189 | 0.158 | 0.094 | 0.136 |
+| divrec | 2.129 | 22.418 | 2.865 | 0.582 | 1.366 | 0.467 | 0.478 | 0.179 | 0.117 | 0.167 |
+| puzzle | 4.947 | 34.492 | 14.340 | 0.447 | 1.937 | 0.759 | 1.034 | 0.183 | 0.156 | 0.193 |
+| triangl | 3.303 | 28.211 | 4.886 | 0.470 | 1.421 | 1.256 | 1.109 | 0.120 | 0.165 | 0.150 |
+| tak | 26.617 | TIMEOUT | 34.653 | 2.208 | 12.830 | 19.879 | 10.634 | 1.286 | 1.214 | 1.284 |
+| takl | 69.954 | TIMEOUT | TIMEOUT | 3.794 | 54.636 | 6.699 | 10.181 | 1.515 | 1.754 | 2.907 |
+| ntakl | 59.004 | TIMEOUT | 58.841 | 3.876 | 50.454 | 6.906 | 10.181 | 1.497 | 1.758 | 2.902 |
+| cpstak | 53.999 | TIMEOUT | 115.780 | 8.182 | 57.108 | 32.713 | 9.710 | 3.037 | 1.663 | 2.134 |
+| ctak | 18.925 | 47.171 | TIMEOUT | 41.748 | 11.822 | 8.544 | 2.231 | 1.710 | 0.430 | 1.283 |
+| fib | 10.338 | 73.815 | 9.677 | 1.033 | 5.780 | 0.907 | 5.239 | 0.409 | 0.507 | 0.533 |
+| fibc | 1.701 | 6.085 | 9.120 | 2.222 | 1.097 | 0.597 | 0.201 | 0.106 | 0.032 | 0.104 |
+| fibfp | 2.843 | 5.998 | 2.189 | 0.636 | 0.661 | 0.078 | 0.581 | 0.089 | 0.150 | 0.163 |
+| sum | 4.816 | 44.873 | 6.015 | 0.390 | 2.230 | 0.410 | 1.704 | 0.171 | 0.221 | 0.254 |
+| sumfp | 5.050 | 10.266 | 4.331 | 1.227 | 0.883 | 0.184 | 0.597 | 0.244 | 0.216 | 0.247 |
+| fft | 1.799 | 16.200 | 3.412 | 0.256 | 0.605 | 0.810 | 0.256 | 0.150 | 0.135 | 0.149 |
+| mbrot | 6.174 | 27.965 | 9.726 | 1.214 | 1.304 | 0.909 | 0.589 | 0.295 | 0.417 | 0.404 |
+| mbrotZ | ERROR | ERROR | 21.650 | 1.185 | 1.975 | 0.604 | 1.434 | 0.509 | 0.312 | 0.326 |
+| nucleic | 2.227 | 9.887 | 4.127 | 0.318 | 1.051 | 0.684 | 0.285 | 0.090 | 0.120 | 0.137 |
+| pi | 0.039 | 0.041 | 52.592 | 0.006 | 0.230 | ERROR | 0.036 | 0.043 | 0.031 | 0.042 |
+| pnpoly | 6.256 | 23.704 | 13.629 | 0.936 | 1.462 | 1.085 | 1.078 | 0.188 | 0.294 | 0.332 |
+| ray | 2.852 | 13.709 | 10.329 | 0.376 | 1.141 | 0.861 | 0.343 | 0.090 | 0.152 | 0.278 |
+| simplex | 4.142 | 49.082 | 10.052 | 0.392 | 2.153 | 1.911 | 0.602 | 0.097 | 0.136 | 0.164 |
+| ack | 21.108 | TIMEOUT | 21.876 | 3.426 | 25.579 | 3.641 | 11.618 | 0.868 | 0.746 | 1.065 |
+| array1 | 4.203 | 26.487 | 3.944 | 0.341 | 1.504 | 0.207 | 0.845 | 0.120 | 0.285 | 0.307 |
+| string | 0.054 | 0.062 | 0.475 | 0.014 | 0.086 | 0.018 | 0.027 | 0.043 | 0.079 | 0.115 |
+| sum1 | 0.093 | 0.159 | 3.862 | 0.273 | 0.066 | 0.016 | 0.708 | 0.029 | 0.043 | 0.725 |
+| cat | 1.848 | 55.966 | 3.482 | 0.976 | 0.873 | 0.067 | 1.754 | 0.168 | 0.196 | 0.422 |
+| tail | 0.226 | 0.879 | 0.535 | 0.408 | 0.339 | 0.034 | 0.220 | 0.192 | 0.200 | 0.210 |
+| wc | 2.415 | 16.795 | 23.162 | 0.587 | 1.222 | 0.391 | 0.833 | 0.104 | 0.093 | 0.253 |
+| read1 | 0.079 | 0.084 | 11.997 | 0.424 | 0.160 | 0.018 | 1.859 | 0.077 | 0.052 | 1.257 |
+| compiler | 1.783 | 14.772 | 6.029 | 0.259 | 1.485 | 1.212 | 0.401 | 0.221 | 0.107 | 0.161 |
+| conform | 3.720 | 27.410 | 7.984 | 0.438 | 2.725 | 2.536 | 0.793 | 0.192 | 0.124 | 0.317 |
+| dynamic | 1.788 | 13.083 | 13.873 | 0.405 | 1.146 | ERROR | TIMEOUT | 0.279 | 0.127 | 1.003 |
+| earley | 22.380 | TIMEOUT | TIMEOUT | 4.628 | 7.159 | 26.902 | 6.661 | 2.644 | 1.881 | 5.818 |
+| graphs | 23.208 | TIMEOUT | TIMEOUT | 2.212 | 18.562 | 17.925 | 2.652 | 2.352 | 0.437 | 0.591 |
+| lattice | 8.039 | 85.119 | 63.284 | 0.685 | 3.766 | 5.341 | 1.161 | 0.303 | 0.209 | 0.263 |
+| matrix | 2.697 | 28.113 | 11.612 | 0.291 | 2.007 | 1.658 | 0.488 | 0.110 | 0.072 | 0.102 |
+| maze | 1.640 | 15.189 | 4.692 | 0.175 | 1.213 | 0.942 | 0.432 | 0.038 | 0.057 | 0.067 |
+| mazefun | 2.678 | 17.494 | 5.929 | 0.343 | 2.195 | 0.783 | 0.861 | 0.144 | 0.125 | 0.189 |
+| nqueens | 6.010 | 98.611 | 9.863 | 0.701 | 4.570 | 2.214 | 1.990 | 0.412 | 0.357 | 0.403 |
+| paraffins | 0.809 | 8.326 | TIMEOUT | 0.440 | 1.346 | 0.289 | 1.085 | 0.366 | 0.330 | 0.611 |
+| parsing | 2.867 | 60.153 | 100.732 | 0.469 | 7.134 | 1.565 | 0.738 | 0.132 | 0.170 | 0.146 |
+| peval | 3.253 | 37.845 | 9.440 | 0.409 | 2.442 | INCORRECT | 0.622 | 0.131 | 0.116 | 0.159 |
+| primes | 0.968 | 10.193 | 1.093 | 0.198 | 0.771 | 0.273 | 0.297 | 0.057 | 0.052 | 0.074 |
+| quicksort | 3.841 | 35.980 | 15.282 | 0.542 | 2.386 | 3.875 | 1.011 | 0.257 | 0.252 | 0.675 |
+| scheme | 2.666 | 15.045 | 6.077 | 0.549 | 1.795 | INCORRECT | 0.966 | 0.262 | 0.143 | 0.238 |
+| slatex | 1.331 | 5.611 | 7.273 | 1.254 | 1.310 | 0.904 | 0.990 | 0.803 | 0.758 | 1.230 |
+| chudnovsky | 0.106 | 0.183 | 11.385 | 0.008 | 0.071 | ERROR | 0.018 | 0.018 | 0.013 | 0.018 |
+| nboyer | 16.050 | TIMEOUT | 20.370 | 1.897 | 8.067 | 16.265 | 6.043 | 1.768 | 1.083 | 2.828 |
+| sboyer | 16.160 | TIMEOUT | 21.032 | 1.762 | 9.551 | 14.238 | 3.856 | 0.675 | 0.519 | 0.811 |
+| gcbench | 34.254 | 83.100 | TIMEOUT | 0.994 | 12.509 | 7.464 | 2.964 | 4.317 | 0.454 | 0.943 |
+| mperm | 6.143 | 49.221 | 15.587 | 0.995 | 2.614 | 1.934 | 1.843 | 0.596 | 0.592 | 1.779 |
+| equal | 0.506 | 0.758 | 22.130 | TIMEOUT | 7.450 | 0.448 | TIMEOUT | 0.171 | 0.381 | 1.568 |
+| bv2string | 0.772 | 7.171 | 0.587 | 0.106 | 0.575 | 0.339 | 0.369 | 0.082 | 0.052 | 0.079 |
 
 Failures:
 
@@ -301,10 +301,10 @@ published ones: Chicken's `tak` takes 11.0s here and 10.8s there.
 
 **Reproducibility** (the phase's exit test):
 
-- Within a run, s2's three times for a benchmark differ by at most 10%
-  (`primes`); most are within 3%.
-- Between the two runs, s2's medians agree within 0.94-1.10x, 1.007 on
-  average. That is the same noise as in P10.
+- Within a run, s2's three times for a benchmark differ by at most 7%
+  (`paraffins`); 46 of 56 are within 3%.
+- Between the two runs, s2's medians agree within 0.95-1.04x, 0.999 on
+  average. That is the same noise as in P10 and P12.
 
 ### What the numbers say about s2
 
@@ -316,29 +316,31 @@ the same way:
   strings and symbols are slow (`browse`, `parsing`, `read1`, `wc`).
 - **Gauche** has had twenty years of tuning: specialised instructions,
   inlined primitives, and a compiler that optimises before generating code.
-  It is twice as fast as s2 overall.
+  It is 1.5 times as fast as s2 overall.
 - **Guile** compiles through CPS with real optimisation, and JIT-compiles
-  its bytecode to machine code. It is 7 times faster.
-- **The native-code compilers** are 10-18 times faster. That is the
+  its bytecode to machine code. It is 5 times faster.
+- **The native-code compilers** are 9-15 times faster. That is the
   usual factor between a good bytecode VM and native code.
 
 **Where s2 does well.** It beats Gauche on:
 
-- `equal` (12x);
+- `equal` (15x);
 - `pi` (6x), on Rust's bignums;
 - `read1`, `parsing`, `string` and `tail`, on its reader and string
-  operations.
+  operations;
+- `paraffins`, `ack` and `cpstak`.
 
 **Where it does worst.** Against Gauche, the biggest gaps are:
 
-- **floating-point code**: `sumfp` (7x slower), `pnpoly`, `mbrot` and
-  `fibfp` (5x). s2's flonums are unboxed (D2), but its arithmetic
+- **floating-point code**: `sumfp` (5.7x slower), `mbrot` (4.7x),
+  `pnpoly` and `fibfp` (4.3x). NaN-boxing sped these up only 1.12-1.24x. s2's flonums are unboxed (D2), but its arithmetic
   instructions have an inline path only for fixnums
   (`src/vm/machine.rs`). Every flonum operation leaves it for the general
   numeric code;
-- `earley`, `fft`, `puzzle` and `array1` (3.2-3.6x): vector access, and
+- `earley`, `fft`, `array1` and `puzzle` (2.6-3.1x): vector access, and
   loops of generic arithmetic;
-- `gcbench` (2.9x): allocation and collection.
+- `gcbench` (2.7x): allocation and collection, which NaN-boxing barely
+  changed.
 
 These suggest where s2's time goes:
 

@@ -71,7 +71,7 @@ Recommended in these documents, each to be confirmed:
 | # | Decision | Recommendation | Where |
 |---|---|---|---|
 | D1 | Project strategy and reuse | **Accepted.** A new crate. Fork the reader, printer, number syntax, io, the syntax-rules matcher and builtin logic from s1, and adapt them. Write a new value representation, heap interface, compiler and VM | 02 |
-| D2 | Value representation | An opaque `Value` type with unboxed fixnums, chars and immediates. Start as a 16-byte `Copy` enum, keep it behind methods, and move to a tagged word later if measurement says so. **After P12:** NaN-boxed, one 64-bit word: flonums stay unboxed, fixnums are 48-bit. 1.11-1.41x faster on `bench/`, 1.22x (geometric mean) on 35 r7rs benchmarks, none slower; only `value.rs` changed | 03 §3 |
+| D2 | Value representation | An opaque `Value` type with unboxed fixnums, chars and immediates. Start as a 16-byte `Copy` enum, keep it behind methods, and move to a tagged word later if measurement says so. **After P12:** NaN-boxed, one 64-bit word: flonums stay unboxed, fixnums are 48-bit. 1.11-1.41x faster on `bench/`, 1.24x (geometric mean) on the 56 r7rs benchmarks in 07's rerun, none slower; only `value.rs` changed | 03 §3 |
 | D3 | Garbage collector | s1's model: non-moving mark-sweep, epoch marks, collection only at safepoints, explicit roots | 03 §4 |
 | D4 | VM model | Stack-based, with frames on a single contiguous value stack | 03 §5 |
 | D5 | Instruction encoding | A Rust `enum Op` ("wordcode") first, a byte encoding when bytecode files arrive. **P11:** files encode each instruction as a tag byte and LEB128 operands, decoded into `Op`s on load | 03 §6 |

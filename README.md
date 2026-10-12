@@ -46,13 +46,13 @@ target/release/s2 -e '(+ 1 2)'         # evaluate an expression
 
 ## Speed
 
-s2 is about 5 times faster than s1. Against established Schemes, measured
+s2 is about 6 times faster than s1. Against established Schemes, measured
 on ecraven's r7rs-benchmarks, it is:
 
-- 3 times faster than chibi;
-- half the speed of Gauche;
-- a seventh of Guile's speed;
-- a tenth to a twentieth of the speed of the native-code compilers.
+- 3.6 times faster than chibi;
+- two-thirds the speed of Gauche;
+- a fifth of Guile's speed;
+- a ninth to a fifteenth of the speed of the native-code compilers.
 
 [plan/07-comparison.md](plan/07-comparison.md) has the details.
 
