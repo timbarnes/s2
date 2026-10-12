@@ -541,13 +541,43 @@ impl Vm {
                     push!(c);
                 }
                 Op::Call(argc) | Op::TailCall(argc) => {
-                    // Calls work on `self.stack`, through the slower paths
-                    // that `apply`, continuations and errors share; `sp` is
-                    // reloaded once the callee is entered. A path that ends
-                    // working on `sp` itself (a return) continues the loop
-                    // directly instead.
-                    sync!();
+                    // The common call, done here on `sp`: a closure, with
+                    // the right number of arguments and no rest list, and
+                    // no collection due.
                     let tail = matches!(op, Op::TailCall(_));
+                    let n = argc as usize + 1;
+                    let base = sp - n;
+                    let f = at!(base);
+                    if let Some(Obj::Closure { template, free: captured }) = f.as_obj().map(|o| &o.kind)
+                        && let callee = template_of(*template)
+                        && !callee.rest
+                        && callee.required == argc
+                        && !heap.needs_gc()
+                    {
+                        if tail {
+                            // Slide the callee and its arguments down to
+                            // where the current procedure's callee slot is.
+                            // A loop, not ptr::copy: n is small, and a
+                            // memmove call costs more.
+                            for i in 0..n {
+                                set!(fp - 1 + i, at!(base + i));
+                            }
+                            sp = fp - 1 + n;
+                        } else {
+                            self.frames.push(Frame { closure, t, free, ip, fp });
+                            fp = base + 1;
+                        }
+                        closure = f.as_ref().unwrap();
+                        (t, free) = (callee, captured);
+                        ip = 0;
+                        continue 'run;
+                    }
+                    // Any other call works on `self.stack`, through the
+                    // slower paths that `apply`, continuations and errors
+                    // share; `sp` is reloaded once the callee is entered. A
+                    // path that ends working on `sp` itself (a return)
+                    // continues the loop directly instead.
+                    sync!();
                     self.safepoint(heap, closure);
                     let base = self.stack.len() - argc as usize - 1;
                     // A loop, because apply, %call/cc and %call/ec rewrite
