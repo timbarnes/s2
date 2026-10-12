@@ -72,6 +72,7 @@ nav:
     - 05 Testing and measurement: design/05-testing.md
     - 06 Directions after P10: design/06-directions.md
     - 07 Comparison with other Schemes: design/07-comparison.md
+    - 08 The compiler in Scheme: design/08-compiler-in-scheme.md
     - Phases:
       - P0: design/phases/P0.md
       - P1: design/phases/P1.md

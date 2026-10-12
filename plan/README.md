@@ -7,7 +7,7 @@ paper, measure where possible, then implement in small steps.
 For using s2, see the [user guide](https://timbarnes.github.io/s2/) (source
 in `docs/`).
 
-**Status:** P0-P7 done 2026-10-10, P8-P12 2026-10-11 ([P0](phases/P0.md), [P1](phases/P1.md), [P2](phases/P2.md), [P3](phases/P3.md), [P4](phases/P4.md), [P5](phases/P5.md), [P6](phases/P6.md), [P7](phases/P7.md), [P8](phases/P8.md), [P9](phases/P9.md), [P10](phases/P10.md), [P11](phases/P11.md), [P12](phases/P12.md)). Next: P13.
+**Status:** P0-P7 done 2026-10-10, P8-P12 2026-10-11 ([P0](phases/P0.md), [P1](phases/P1.md), [P2](phases/P2.md), [P3](phases/P3.md), [P4](phases/P4.md), [P5](phases/P5.md), [P6](phases/P6.md), [P7](phases/P7.md), [P8](phases/P8.md), [P9](phases/P9.md), [P10](phases/P10.md), [P11](phases/P11.md), [P12](phases/P12.md)). Next: P13, planned in [08](08-compiler-in-scheme.md).
 
 ## Goals
 
@@ -45,6 +45,8 @@ in `docs/`).
 | [04-roadmap.md](04-roadmap.md) | The incremental phases, each with goals, what it teaches, decisions, exit tests and benchmarks |
 | [05-testing.md](05-testing.md) | How each phase is verified: differential testing against s1, golden disassembly, GC stress, conformance, benchmarks |
 | [06-directions.md](06-directions.md) | Written after P10: the compiler in Scheme here or in a fork, a reduced runtime, comparing with other Schemes, embedded targets, native code |
+| [07-comparison.md](07-comparison.md) | P12: s2 against eight other Schemes and s1, in architecture, completeness, features and performance |
+| [08-compiler-in-scheme.md](08-compiler-in-scheme.md) | The plan for P13: the decisions to settle, sub-phases P13.0-P13.6 and their exit tests, and the risks |
 
 Read them in order the first time. During implementation, 04 is the working
 document, and 03 is the reference for why things are shaped as they are.
@@ -65,6 +67,7 @@ Already made by the user:
 | U8 | Phases after P11 | P12 comparison with other Schemes, P13 the compiler in Scheme |
 | U9 | Embedded targets (ESP32) | Not planned (06 §4) |
 | U10 | Native code | Not planned for now (06 §5) |
+| C1-C11 | The compiler in Scheme | Settled before P13 (08): environments stay in Rust, the Scheme compiler must produce the Rust compiler's code exactly, back end first |
 
 Recommended in these documents, each to be confirmed:
 
