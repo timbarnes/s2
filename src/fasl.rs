@@ -139,7 +139,8 @@ pub fn write(heap: &Heap, target: GcRef, templates: &[GcRef], sources: &[PathBuf
     let target_env = w.env(target)?;
     w.bindings(&mut bindings, target_env, target, &touched)?;
     while let Some((i, env)) = w.pending_envs.pop() {
-        let keys: Vec<GcRef> = env_of(env).borrow().bindings().map(|(k, _)| k).collect();
+        let mut keys: Vec<GcRef> = env_of(env).borrow().bindings().map(|(k, _)| k).collect();
+        w.sort_keys(env, &mut keys);
         w.bindings(&mut bindings, i, env, &keys)?;
         groups += 1;
     }
@@ -384,6 +385,22 @@ impl Writer<'_> {
 
     fn env(&mut self, env: GcRef) -> Result<u32, String> {
         self.obj(env)
+    }
+
+    /// Put an environment's keys, which come in hash-table order, in an
+    /// order that doesn't depend on addresses, so compiling the same file
+    /// twice gives the same bytes: by name, then, for the hidden
+    /// definitions of macros (several aliases can share a name, such as
+    /// `define-record-type`'s `index`), by where the code first uses what
+    /// they are bound to.
+    fn sort_keys(&self, env: GcRef, keys: &mut [GcRef]) {
+        keys.sort_by_cached_key(|&k| {
+            let used = match env_of(env).borrow().lookup(k) {
+                Some(TopBinding::Variable(r) | TopBinding::Macro(r)) => self.index.get(&r).copied(),
+                _ => None,
+            };
+            (print_value(Value::obj(k)), used.unwrap_or(u32::MAX))
+        });
     }
 
     /// The bindings of `keys` in `env` (object `i`), into `out`.

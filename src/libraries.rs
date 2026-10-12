@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins::{Error, Primitive, err, expected, kind, list_arg, prim, string_arg};
-use crate::compile::codegen::codegen;
+use crate::compile::generate;
 use crate::compile::expand::expand;
 use crate::compile::syntax_rules::{identifier, name as id_name, strip};
 use crate::fasl;
@@ -496,7 +496,7 @@ fn compiled_library(heap: &mut Heap, path: &str) -> Result<Vec<GcRef>, String> {
         let mut templates = Vec::new();
         for form in read_library_file(heap, path)? {
             let ast = expand(heap, target, form)?;
-            templates.push(codegen(heap, &ast));
+            templates.push(generate(heap, &ast));
         }
         Ok(templates)
     })();

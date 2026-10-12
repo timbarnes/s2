@@ -111,7 +111,7 @@ impl Session {
                 let mut result = Ok(());
                 while let Ok(datum) = parse(&mut self.heap, &mut port) {
                     result = self.expand(datum).and_then(|ast| {
-                        let t = compile::codegen::codegen(&mut self.heap, &ast);
+                        let t = compile::generate(&mut self.heap, &ast);
                         templates.push(t);
                         self.heap.pinned.push(Value::obj(t));
                         self.vm.run(&mut self.heap, t).map(|_| ())
@@ -172,14 +172,21 @@ impl Session {
     }
 
     fn run(&mut self, ast: &compile::ast::Expr) -> Result<Value, String> {
+        let template = self.generate(ast);
+        self.vm.run(&mut self.heap, template)
+    }
+
+    /// Generate a form's code, printing its AST and code for `--expand`
+    /// and `--dis`.
+    fn generate(&mut self, ast: &compile::ast::Expr) -> GcRef {
         if self.expand {
             io::write_stdout(&self.heap, &format!("{}\n", compile::ast::show(ast)));
         }
-        let template = compile::codegen::codegen(&mut self.heap, ast);
+        let template = compile::generate(&mut self.heap, ast);
         if self.dis {
             io::write_stdout(&self.heap, &compile::disasm::disassemble(template));
         }
-        self.vm.run(&mut self.heap, template)
+        template
     }
 
     /// `(%load-library "path")`, written in Scheme (scheme/core.scm).
@@ -316,7 +323,7 @@ impl Session {
             };
             match self.expand(datum) {
                 Ok(ast) => {
-                    let t = compile::codegen::codegen(&mut self.heap, &ast);
+                    let t = self.generate(&ast);
                     self.heap.pinned.push(Value::obj(t));
                     templates.push(t);
                     // A library the program defines is registered now, so the

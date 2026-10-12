@@ -332,8 +332,10 @@ chibi's suite at 1154.
 
 ### P13.0. Groundwork
 
-- **Tag** the repository `rust-compiler`. Add the cargo feature
-  `rust-compiler`, on by default.
+- **Tag** the repository `rust-compiler`. (The cargo feature
+  `rust-compiler` moved to P13.5: until then the Rust compiler is what
+  builds the Scheme one, so there is nothing for the feature to leave
+  out.)
 - **`%make-template`** (C1), and the instruction table it reads: a name
   for each `Op`, with its operands.
 - **The AST as data** (C2): a Rust converter from `Expr` to tagged
@@ -401,6 +403,8 @@ The largest sub-phase, built in steps, each tested before the switch:
 - The Scheme compiler, built by the Rust compiler (stage 1), compiles
   its own source to an image (stage 2). Stage 2 compiles it again
   (stage 3).
+- The cargo feature `rust-compiler`, on by default, leaves the Rust
+  compiler out when off.
 - **Exit:** stages 1, 2 and 3 are byte-identical. Identical code (C7)
   makes this expected rather than hoped for. With
   `--no-default-features` (no Rust compiler), s2 starts from a stage-2
@@ -427,6 +431,7 @@ The largest sub-phase, built in steps, each tested before the switch:
 |---|---|
 | **Compiling is much slower.** 06 expected several times slower. The REPL and first loads would feel it; programs and libraries compiled ahead would not | Measured from P13.1 on. The likely costs are lookups through primitives and allocation. The image keeps startup fast whatever compile speed is |
 | **Matching the Rust compiler byte for byte is fiddly** (variable numbering, constant order) | The diff names the exact form. Where matching would distort the Scheme code badly, a difference can be accepted on purpose, recorded, and checked by hand |
+| **Bad code reaching the VM.** Since P12's fixed stack, the dispatch loop reads stack slots unchecked in release builds, so a wrong slot from a codegen bug is a memory error, not a panic. `%make-template` checks constants, jumps and free variables, not slots | The oracle (C7) catches wrong code before it ships. The test suites also run in debug builds, where every slot access is checked. A full check needs the stack depth at each instruction: a verifier, worth adding if the Rust compiler goes |
 | **Rooting bugs** in Rust code that now spans a collection | GC stress and poisoning on every sub-phase. Pinning at the few Rust call sites (C6 keeps them few) |
 | **A broken image** stops s2 from starting | During P13 the Rust compiler rebuilds it (C5 a). The tag is the last resort |
 | **Deep recursion** in the compiler | It now runs on the VM's stack, which allows millions of frames. The large Rust stack in `main` and `.cargo/config.toml` can go once the Rust compiler does |
