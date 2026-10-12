@@ -14,12 +14,9 @@ pub static PRIMITIVES: &[Primitive] = &[
         Ok(h.vector(vec![a.get(1).copied().unwrap_or(Value::UNSPECIFIED); n]))
     }),
     prim("vector", 0, None, |h, a| Ok(h.vector(a.to_vec()))),
-    prim("vector-length", 1, Some(1), |_, a| Ok(fixnum(vector_arg(a[0], "vector-length")?.len()))),
-    prim("vector-ref", 2, Some(2), |_, a| Ok(element(vector_arg(a[0], "vector-ref")?, a[1], "vector-ref")?.get())),
-    prim("vector-set!", 3, Some(3), |_, a| {
-        element(vector_arg(a[0], "vector-set!")?, a[1], "vector-set!")?.set(a[2]);
-        Ok(Value::UNSPECIFIED)
-    }),
+    prim("vector-length", 1, Some(1), vector_length),
+    prim("vector-ref", 2, Some(2), vector_ref),
+    prim("vector-set!", 3, Some(3), vector_set),
     prim("vector->list", 1, Some(3), |h, a| {
         let items = values(a, "vector->list")?;
         Ok(h.list(items))
@@ -99,6 +96,20 @@ pub static PRIMITIVES: &[Primitive] = &[
         Ok(h.bytevector(chars[start..end].iter().collect::<String>().into_bytes()))
     }),
 ];
+
+// Named, as the VM calls them when it can't inline them (`Op::VectorRef`).
+pub fn vector_length(_: &mut crate::heap::Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(fixnum(vector_arg(a[0], "vector-length")?.len()))
+}
+
+pub fn vector_ref(_: &mut crate::heap::Heap, a: &[Value]) -> Result<Value, Error> {
+    Ok(element(vector_arg(a[0], "vector-ref")?, a[1], "vector-ref")?.get())
+}
+
+pub fn vector_set(_: &mut crate::heap::Heap, a: &[Value]) -> Result<Value, Error> {
+    element(vector_arg(a[0], "vector-set!")?, a[1], "vector-set!")?.set(a[2]);
+    Ok(Value::UNSPECIFIED)
+}
 
 /// Element `k` of `items`, checked.
 fn element<'a, T>(items: &'a [Cell<T>], k: Value, who: &str) -> Result<&'a Cell<T>, Error> {

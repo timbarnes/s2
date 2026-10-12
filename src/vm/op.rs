@@ -83,9 +83,10 @@ pub enum Op {
     // Inlined primitives (plan/03 §11): a call to one of these standard
     // procedures, with this many arguments, compiles to one instruction
     // instead of `GlobalRef` and `Call`. Each replaces its arguments on the
-    // stack with its result. The common case (a pair, fixnums) is done in
-    // the dispatch loop; anything else calls the builtin itself, so the
-    // results and errors are the builtin's.
+    // stack with its result. The common case (a pair; fixnums or flonums;
+    // a vector and an index in range) is done in the dispatch loop;
+    // anything else calls the builtin itself, so the results and errors are
+    // the builtin's.
     Car,
     Cdr,
     Cons,
@@ -95,11 +96,16 @@ pub enum Op {
     Not,
     Add,
     Sub,
+    Mul,
+    Div,
     NumEq,
     Lt,
     Gt,
     Le,
     Ge,
+    VectorLength,
+    VectorRef,
+    VectorSet,
 }
 
 /// The tests `JumpIfNot` can make: the inlined predicates and
@@ -151,11 +157,16 @@ impl Op {
             ("not", 1) => Op::Not,
             ("+", 2) => Op::Add,
             ("-", 2) => Op::Sub,
+            ("*", 2) => Op::Mul,
+            ("/", 2) => Op::Div,
             ("=", 2) => Op::NumEq,
             ("<", 2) => Op::Lt,
             (">", 2) => Op::Gt,
             ("<=", 2) => Op::Le,
             (">=", 2) => Op::Ge,
+            ("vector-length", 1) => Op::VectorLength,
+            ("vector-ref", 2) => Op::VectorRef,
+            ("vector-set!", 3) => Op::VectorSet,
             _ => return None,
         })
     }

@@ -1,18 +1,16 @@
 template top-level
-   0  GlobalRef k0     ; *
-   1  Fixnum 6
-   2  Fixnum 7
-   3  TailCall 2
+   0  Fixnum 6
+   1  Fixnum 7
+   2  Mul
+   3  Return
 template top-level
-   0  GlobalRef k0     ; *
-   1  Fixnum 2
-   2  Fixnum 3
-   3  Call 2
-   4  Fixnum 10
-   5  GlobalRef k0     ; *
-   6  Fixnum 2
-   7  Fixnum 2
-   8  Call 2
-   9  Sub
-  10  Add
-  11  Return
+   0  Fixnum 2
+   1  Fixnum 3
+   2  Mul
+   3  Fixnum 10
+   4  Fixnum 2
+   5  Fixnum 2
+   6  Mul
+   7  Sub
+   8  Add
+   9  Return

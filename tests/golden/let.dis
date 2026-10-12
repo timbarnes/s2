@@ -3,16 +3,15 @@ template top-level
    1  GlobalDefine k1  ; f
    2  Return
 template f  arity 1
-   0  GlobalRef k0     ; *
-   1  LocalRef 0       ; x
-   2  Fixnum 2
-   3  Call 2
-   4  Fixnum 3
-   5  GlobalRef k1     ; +
-   6  LocalRef 0       ; x
-   7  LocalRef 1       ; y
-   8  LocalRef 2       ; z
-   9  TailCall 3
+   0  LocalRef 0       ; x
+   1  Fixnum 2
+   2  Mul
+   3  Fixnum 3
+   4  GlobalRef k0     ; +
+   5  LocalRef 0       ; x
+   6  LocalRef 1       ; y
+   7  LocalRef 2       ; z
+   8  TailCall 3
 template top-level
    0  GlobalRef k0     ; +
    1  Fixnum 1

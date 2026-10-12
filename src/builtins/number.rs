@@ -304,7 +304,7 @@ pub fn sub(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     fold(heap, Num::of(args[0], "-")?, &args[1..], Op::Sub, "-")
 }
 
-fn mul(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
+pub fn mul(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     if let Some(mut ns) = all_fixnums(args)
         && let Some(p) = ns.try_fold(1i128, |a, b| a.checked_mul(b))
     {
@@ -326,7 +326,7 @@ fn divide(a: Num, b: Num) -> Result<Num, Error> {
     }
 }
 
-fn div(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
+pub fn div(heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
     let first = Num::of(args[0], "/")?;
     let mut acc = if args.len() == 1 { divide(Num::Int(BigInt::one()), first)? } else { first };
     for &a in &args[1..] {

@@ -43,7 +43,7 @@
 //! catches errors from builtins, unbound variables and bad calls alike.
 //! Only an error nobody handles comes out of `run`, through `%abort`.
 
-use crate::builtins::{Error, ErrorKind, PrimFn, Primitive, list, number, predicate, standard_ports};
+use crate::builtins::{Error, ErrorKind, PrimFn, Primitive, list, number, predicate, standard_ports, vector};
 use crate::compile;
 use crate::globals::{TopBinding, cell_name, cell_value, env_of};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
@@ -118,6 +118,54 @@ fn pair_of<'a>(v: Value) -> Option<(&'a std::cell::Cell<Value>, &'a std::cell::C
         Some(Obj::Pair { car, cdr }) => Some((car, cdr)),
         _ => None,
     }
+}
+
+fn vector_of<'a>(v: Value) -> Option<&'a [std::cell::Cell<Value>]> {
+    match v.as_obj().map(|o| &o.kind) {
+        Some(Obj::Vector(items)) => Some(items),
+        _ => None,
+    }
+}
+
+/// Two numbers an arithmetic instruction handles inline: two fixnums, or
+/// flonums. A fixnum with a flonum becomes a flonum, exactly, as a fixnum
+/// has 48 bits; that is what the builtins do too.
+enum Nums {
+    Fix(i64, i64),
+    Flo(f64, f64),
+}
+
+#[inline(always)]
+fn nums(a: Value, b: Value) -> Option<Nums> {
+    if let (Some(x), Some(y)) = (a.as_fixnum(), b.as_fixnum()) {
+        return Some(Nums::Fix(x, y));
+    }
+    let flo = |v: Value| v.as_flonum().or_else(|| v.as_fixnum().map(|n| n as f64));
+    Some(Nums::Flo(flo(a)?, flo(b)?))
+}
+
+/// The inline result of a numeric comparison: `None` when the arguments
+/// aren't fixnums or flonums. A NaN compares false with everything.
+#[inline(always)]
+fn compare(test: Test, a: Value, b: Value) -> Option<bool> {
+    use std::cmp::Ordering::*;
+    let ord = match nums(a, b)? {
+        Nums::Fix(x, y) => Some(x.cmp(&y)),
+        Nums::Flo(x, y) => x.partial_cmp(&y),
+    };
+    Some(match test {
+        Test::NumEq => ord == Some(Equal),
+        Test::Lt => ord == Some(Less),
+        Test::Gt => ord == Some(Greater),
+        Test::Le => matches!(ord, Some(Less | Equal)),
+        Test::Ge => matches!(ord, Some(Greater | Equal)),
+        Test::NullP | Test::PairP | Test::EqP => unreachable!("not a comparison"),
+    })
+}
+
+/// The element `k` of the vector `v`, if `k` is in range.
+fn element<'a>(v: Value, k: Value) -> Option<&'a std::cell::Cell<Value>> {
+    vector_of(v)?.get(usize::try_from(k.as_fixnum()?).ok()?)
 }
 
 fn box_contents<'a>(b: Value) -> &'a std::cell::Cell<Value> {
@@ -353,16 +401,15 @@ impl Vm {
                     let at = self.stack.len() - test.arity();
                     let a = self.stack[at];
                     let b = self.stack.get(at + 1).copied().unwrap_or(Value::NIL);
-                    let fixnums = || Some((a.as_fixnum()?, b.as_fixnum()?));
                     let fast = match test {
                         Test::NullP => Some(a.is_nil()),
                         Test::PairP => Some(pair_of(a).is_some()),
                         Test::EqP => Some(a.eq(b)),
-                        Test::NumEq => fixnums().map(|(x, y)| x == y),
-                        Test::Lt => fixnums().map(|(x, y)| x < y),
-                        Test::Gt => fixnums().map(|(x, y)| x > y),
-                        Test::Le => fixnums().map(|(x, y)| x <= y),
-                        Test::Ge => fixnums().map(|(x, y)| x >= y),
+                        Test::NumEq => compare(Test::NumEq, a, b),
+                        Test::Lt => compare(Test::Lt, a, b),
+                        Test::Gt => compare(Test::Gt, a, b),
+                        Test::Le => compare(Test::Le, a, b),
+                        Test::Ge => compare(Test::Ge, a, b),
                     };
                     let holds = match fast {
                         Some(holds) => holds,
@@ -531,15 +578,46 @@ impl Vm {
                 Op::Not => inline1!('run, |a: Value| Some(Value::bool(!a.is_true())), predicate::not),
                 Op::Cons => inline2!('run, |a, b| Some(heap.cons(a, b)), list::cons),
                 Op::EqP => inline2!('run, |a: Value, b| Some(Value::bool(a.eq(b))), predicate::eq_q),
-                // Two fixnums' sum or difference fits an i64; Value::fixnum
-                // says whether it is still a fixnum.
-                Op::Add => inline2!('run, |a: Value, b: Value| Value::fixnum(a.as_fixnum()? + b.as_fixnum()?), number::add),
-                Op::Sub => inline2!('run, |a: Value, b: Value| Value::fixnum(a.as_fixnum()? - b.as_fixnum()?), number::sub),
-                Op::NumEq => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? == b.as_fixnum()?)), number::num_eq),
-                Op::Lt => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? < b.as_fixnum()?)), number::lt),
-                Op::Gt => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? > b.as_fixnum()?)), number::gt),
-                Op::Le => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? <= b.as_fixnum()?)), number::le),
-                Op::Ge => inline2!('run, |a: Value, b: Value| Some(Value::bool(a.as_fixnum()? >= b.as_fixnum()?)), number::ge),
+                // Two fixnums' sum or difference fits an i64, and their
+                // product is checked; Value::fixnum says whether the result
+                // is still a fixnum. Exact division (of two fixnums) is left
+                // to the builtin, as its result may be a ratio.
+                Op::Add => inline2!('run, |a, b| match nums(a, b)? {
+                    Nums::Fix(x, y) => Value::fixnum(x + y),
+                    Nums::Flo(x, y) => Some(Value::flonum(x + y)),
+                }, number::add),
+                Op::Sub => inline2!('run, |a, b| match nums(a, b)? {
+                    Nums::Fix(x, y) => Value::fixnum(x - y),
+                    Nums::Flo(x, y) => Some(Value::flonum(x - y)),
+                }, number::sub),
+                Op::Mul => inline2!('run, |a, b| match nums(a, b)? {
+                    Nums::Fix(x, y) => Value::fixnum(x.checked_mul(y)?),
+                    Nums::Flo(x, y) => Some(Value::flonum(x * y)),
+                }, number::mul),
+                Op::Div => inline2!('run, |a, b| match nums(a, b)? {
+                    Nums::Fix(..) => None,
+                    Nums::Flo(x, y) => Some(Value::flonum(x / y)),
+                }, number::div),
+                Op::NumEq => inline2!('run, |a, b| compare(Test::NumEq, a, b).map(Value::bool), number::num_eq),
+                Op::Lt => inline2!('run, |a, b| compare(Test::Lt, a, b).map(Value::bool), number::lt),
+                Op::Gt => inline2!('run, |a, b| compare(Test::Gt, a, b).map(Value::bool), number::gt),
+                Op::Le => inline2!('run, |a, b| compare(Test::Le, a, b).map(Value::bool), number::le),
+                Op::Ge => inline2!('run, |a, b| compare(Test::Ge, a, b).map(Value::bool), number::ge),
+                Op::VectorLength => inline1!('run, |a| vector_of(a).and_then(|items| Value::fixnum(items.len() as i64)), vector::vector_length),
+                Op::VectorRef => inline2!('run, |a, b| element(a, b).map(std::cell::Cell::get), vector::vector_ref),
+                Op::VectorSet => {
+                    let at = self.stack.len() - 3;
+                    match element(self.stack[at], self.stack[at + 1]) {
+                        Some(cell) => cell.set(self.stack[at + 2]),
+                        None => {
+                            if let Err(e) = vector::vector_set(heap, &self.stack[at..]) {
+                                fail!('run, e);
+                            }
+                        }
+                    }
+                    self.stack.truncate(at);
+                    self.stack.push(Value::UNSPECIFIED);
+                }
             }
         }
     }

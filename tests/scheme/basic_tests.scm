@@ -671,3 +671,23 @@
 (test-equal 1/1024 (exact 9.765625e-4) "exact of a binary fraction")
 (test-equal 16 (square 4) "square")
 (test-equal -0.0 (- 0.0) "unary minus keeps the sign of zero")
+
+;; The inlined arithmetic, comparisons and vector access (each call below
+;; compiles to one instruction): their fast paths must agree with the
+;; builtins, which they fall back to.
+(define (inlined a b) (list (+ a b) (- a b) (* a b) (/ a b) (< a b) (= a b) (>= a b)))
+(test-equal '(7.0 -1.0 12.0 0.75 #t #f #f) (inlined 3 4.0) "inlined: a fixnum and a flonum")
+(test-equal '(10 2 24 3/2 #f #f #t) (inlined 6 4) "inlined: fixnums, exact division")
+(test-equal '(#f #f #f) (cddddr (inlined +nan.0 1)) "inlined: NaN compares false")
+(test-equal '(281474976710654 0 19807040628565802923409276929)
+    (let ((r (inlined 140737488355327 140737488355327))) (list (car r) (cadr r) (caddr r))) "inlined: overflow to bignums")
+(test-equal +inf.0 (/ 2.0 0) "inlined: inexact division by exact zero")
+(test-equal '(#(9.5 2 3) 9.5 3)
+    (let ((v (vector 1 2 3))) (vector-set! v 0 9.5) (list v (vector-ref v 0) (vector-length v)))
+    "inlined vector access")
+(test-equal "vector-ref: index 3 out of range for length 3"
+    (guard (e (#t (error-object-message e))) (vector-ref (vector 1 2 3) 3))
+    "inlined vector-ref falls back to the builtin's error")
+(test-equal "vector-set!: index must be a non-negative integer, got -1"
+    (guard (e (#t (error-object-message e))) (vector-set! (vector 1) -1 0))
+    "inlined vector-set! falls back to the builtin's error")

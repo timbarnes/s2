@@ -22,7 +22,7 @@ pub mod predicate;
 mod record;
 mod string;
 mod system;
-mod vector;
+pub mod vector;
 
 use std::cell::{Cell, RefCell};
 

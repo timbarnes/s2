@@ -522,6 +522,11 @@ fn put_op(b: &mut Vec<u8>, op: Op) {
         Op::Gt => b.push(38),
         Op::Le => b.push(39),
         Op::Ge => b.push(40),
+        Op::Mul => b.push(41),
+        Op::Div => b.push(42),
+        Op::VectorLength => b.push(43),
+        Op::VectorRef => b.push(44),
+        Op::VectorSet => b.push(45),
     }
 }
 
@@ -649,6 +654,11 @@ impl Reader<'_> {
             38 => Op::Gt,
             39 => Op::Le,
             40 => Op::Ge,
+            41 => Op::Mul,
+            42 => Op::Div,
+            43 => Op::VectorLength,
+            44 => Op::VectorRef,
+            45 => Op::VectorSet,
             _ => return Err(TRUNCATED.into()),
         })
     }

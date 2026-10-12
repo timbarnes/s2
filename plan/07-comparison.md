@@ -176,6 +176,14 @@ features that would make it practical rather than educational:
 > slower), and every other system's times are within 3% of P12's. So
 > Gauche's lead over s2 fell from 1.8x to 1.5x, and s2's over chibi grew
 > from 2.9x to 3.6x.
+>
+> **Since then**, flonum fast paths in the arithmetic instructions and
+> new inlined `*`, `/`, `vector-length`, `vector-ref` and `vector-set!`
+> made s2 1.15 times faster again (geometric mean over 56, against Gauche
+> as a control). The floating-point and vector benchmarks gained most:
+> `mbrot` 4.3x, `sumfp` 4.1x, `fft` 3.1x, `fibfp` 2.9x, `pnpoly` 2.3x,
+> `array1` and `puzzle` 1.4x. Gauche now takes 0.81 of s2's time. The
+> tables below don't include this.
 
 ecraven's [r7rs-benchmarks](https://github.com/ecraven/r7rs-benchmarks),
 57 programs, run by `bench/r7rs/run.sh`:
