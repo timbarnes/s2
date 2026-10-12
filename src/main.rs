@@ -909,6 +909,25 @@ mod tests {
         check("(define (deep n) (if (= n 0) (%frame-depth) (+ 0 (deep (- n 1))))) (deep 100)", &["deep", "100"]);
     }
 
+    #[test]
+    fn a_full_stack_ends_the_form() {
+        let mut s = Session::new();
+        s.vm.set_stack_size(1 << 16);
+        let mut eval = |src: &str| {
+            let mut port = io::new_string_port_input(src);
+            let mut last = Ok(Value::UNSPECIFIED);
+            while let Ok(datum) = parse(&mut s.heap, &mut port) {
+                last = s.eval(datum).map_err(|e| e.to_string());
+            }
+            last
+        };
+        let overflow = Err("stack overflow".to_string());
+        assert_eq!(eval("(define (down n) (+ 1 (down n))) (down 0)").map(|_| ()), overflow);
+        assert_eq!(eval("(apply + (make-list 100000 1))").map(|_| ()), overflow);
+        // Deep recursion short of the limit, and the session still works.
+        assert_eq!(eval("(define (count n) (if (= n 0) 0 (+ 1 (count (- n 1))))) (count 10000)").unwrap().as_fixnum(), Some(10000));
+    }
+
     /// Evaluate `src` in a fresh session with the default GC schedule and
     /// return the session and the last result.
     fn session_after(src: &str) -> (Session, Value) {

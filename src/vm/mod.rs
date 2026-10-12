@@ -2,6 +2,7 @@
 
 pub mod machine;
 pub mod op;
+pub mod stack;
 #[cfg(feature = "stats")]
 pub mod stats;
 

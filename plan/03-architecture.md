@@ -223,7 +223,7 @@ allocation in numeric code.
 **Layout.** Two stacks in the VM:
 
 ```
-value stack (Vec<Value>):
+value stack (Vec<Value>; after P12 one fixed allocation, vm/stack.rs):
    ... │ caller's temporaries │ callee │ arg0 … argN-1 │ locals │ temporaries │
                                 ▲ fp
 
@@ -234,6 +234,13 @@ frame stack (Vec<Frame>):
 This is clox's arrangement. It keeps the value stack free of return
 addresses, makes frames simple to inspect for error messages, and makes
 continuation capture a copy of two vectors (§10).
+
+**After P12**, the value stack is one fixed, zeroed allocation of 64M
+values, which the system maps only as it is touched. As it never moves,
+the dispatch loop keeps the stack pointer in a local and writes it back
+only before a call, a safepoint or an error, instead of updating a
+`Vec`'s length in memory on every push and pop. A push past the end ends
+the form with `stack overflow`.
 
 ---
 

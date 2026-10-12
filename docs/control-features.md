@@ -8,7 +8,7 @@ s2 is properly tail-recursive: a procedure call in tail position reuses the call
 
 Calls inside `guard`, `parameterize`, `dynamic-wind` and `with-exception-handler` bodies aren't tail calls, since those forms must do something after the body returns.
 
-Recursion that isn't in tail position is limited only by memory: the VM's stack grows on the heap, so a recursion ten million calls deep works.
+Recursion that isn't in tail position can go about 20 million calls deep for a simple procedure: the VM's value stack holds 64 million values, and the system only gives it memory as it is used. A program that goes deeper ends with `stack overflow`, which can't be caught, as handling it would need more stack.
 
 `(%frame-depth)`, an internal procedure, returns the number of frames waiting for a return; `tests/scheme/tail_tests.scm` uses it to check every tail context.
 

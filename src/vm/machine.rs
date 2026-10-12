@@ -50,6 +50,7 @@ use crate::heap::{GcRef, Heap, Obj, list_to_vec};
 use crate::printer::{display_value, print_value};
 use crate::value::Value;
 use crate::vm::op::{Op, Template, Test};
+use crate::vm::stack::{self, Stack};
 
 /// A caller's registers, saved while its callee runs. The closure's
 /// template and free variables are saved too, so a return needn't look
@@ -72,7 +73,7 @@ impl PartialEq for Frame {
 }
 
 pub struct Vm {
-    stack: Vec<Value>,
+    stack: Stack,
     frames: Vec<Frame>,
     /// The current input, output and error ports (`builtins::port`).
     pub ports: [Value; 3],
@@ -213,7 +214,7 @@ pub fn uncaught_message(obj: Value) -> String {
 
 impl Vm {
     pub fn new(heap: &mut Heap) -> Vm {
-        Vm { stack: Vec::new(), frames: Vec::new(), ports: standard_ports(heap), backtrace: Vec::new(), captures: 0 }
+        Vm { stack: Stack::new(stack::SIZE), frames: Vec::new(), ports: standard_ports(heap), backtrace: Vec::new(), captures: 0 }
     }
 
     /// The number of frames waiting for a callee to return.
@@ -221,11 +222,18 @@ impl Vm {
         self.frames.len()
     }
 
-    /// The largest the value and frame stacks have been (their capacities,
-    /// which never shrink), for tests of tail calls.
+    /// The largest the value and frame stacks have been (for frames, the
+    /// capacity, which never shrinks), for tests of tail calls.
     #[cfg(test)]
     pub fn high_water(&self) -> (usize, usize) {
-        (self.stack.capacity(), self.frames.capacity())
+        (self.stack.high(), self.frames.capacity())
+    }
+
+    /// Replace the value stack with one of `size` values, for tests of
+    /// overflow.
+    #[cfg(test)]
+    pub fn set_stack_size(&mut self, size: usize) {
+        self.stack = Stack::new(size);
     }
 
     /// The names of the procedures in the frame stack, innermost first,
@@ -279,6 +287,68 @@ impl Vm {
         let mut ip = 0;
         let mut fp = 1;
 
+        // The value stack, as the loop sees it: `sb` is its first slot
+        // (fixed, as the stack never moves), and `sp` the number of slots
+        // in use, kept here in a local rather than in `self.stack`. `sync!`
+        // writes `sp` back before anything else reads the stack: a
+        // safepoint, a call, raising an error. `reload!` reads it after
+        // anything that changed it.
+        let sb = self.stack.base();
+        let limit = self.stack.limit();
+        let mut sp = self.stack.len();
+        macro_rules! sync {
+            () => {
+                self.stack.set_len(sp)
+            };
+        }
+        macro_rules! reload {
+            () => {
+                sp = self.stack.len()
+            };
+        }
+        // SAFETY, for the accesses below: codegen keeps every slot an
+        // instruction reads below `sp`, and `push!` keeps `sp` within the
+        // allocation. The debug assertions check the first.
+        macro_rules! at {
+            ($i:expr) => {{
+                let i = $i;
+                debug_assert!(i < sp);
+                unsafe { *sb.add(i) }
+            }};
+        }
+        macro_rules! set {
+            ($i:expr, $v:expr) => {{
+                let (i, v) = ($i, $v);
+                debug_assert!(i < sp);
+                unsafe { *sb.add(i) = v }
+            }};
+        }
+        macro_rules! push {
+            ($v:expr) => {{
+                let v = $v;
+                if sp >= limit {
+                    return Err(stack_overflow());
+                }
+                unsafe { *sb.add(sp) = v }
+                sp += 1;
+            }};
+        }
+        macro_rules! pop {
+            () => {{
+                debug_assert!(sp > 0);
+                sp -= 1;
+                unsafe { *sb.add(sp) }
+            }};
+        }
+        // The slots `from..sp`, for a builtin's arguments.
+        macro_rules! slots {
+            ($from:expr) => {{
+                let from = $from;
+                debug_assert!(from <= sp);
+                unsafe { std::slice::from_raw_parts(sb.add(from), sp - from) }
+            }};
+        }
+
         // Continue in the topmost frame, with `v` as the value returned to
         // it; with no frames left, the top-level form is finished.
         macro_rules! resume {
@@ -290,7 +360,7 @@ impl Vm {
                         (t, free) = (frame.t, frame.free);
                         ip = frame.ip;
                         fp = frame.fp;
-                        self.stack.push(v);
+                        push!(v);
                     }
                     None => return Ok(v),
                 }
@@ -301,7 +371,7 @@ impl Vm {
         macro_rules! do_return {
             ($v:expr) => {{
                 let v = $v;
-                self.stack.truncate(fp - 1);
+                sp = fp - 1;
                 resume!(v);
             }};
         }
@@ -311,7 +381,7 @@ impl Vm {
         // returns). Before `scheme/core.scm` has defined `%raise-error`,
         // the error just aborts the form. `$run` is the label of the
         // instruction loop (labels in macros are hygienic, so each use names
-        // it).
+        // it). The stack must be synced first.
         macro_rules! fail {
             ($run:lifetime, $e:expr) => {{
                 // Out of line, so the error path doesn't bloat every
@@ -319,20 +389,11 @@ impl Vm {
                 (closure, fp) = self.raise(heap, $e.into(), Frame { closure, t, free, ip, fp })?;
                 (t, free) = parts(closure);
                 ip = 0;
+                reload!();
                 continue $run;
             }};
         }
 
-        // An inlined primitive of one or two arguments (`Op::Car` and the
-        // rest): `$fast` gives the result from the arguments if it can,
-        // else the builtin `$slow` is called on them. `$run` is the
-        // instruction loop's label, as for `fail!`.
-        macro_rules! inline1 {
-            ($run:lifetime, $fast:expr, $slow:expr) => {{
-                let a = *self.stack.last().unwrap();
-                *self.stack.last_mut().unwrap() = fast_or_slow!($run, $fast(a), $slow(heap, &[a]));
-            }};
-        }
         // `$fast`, a result if it has one, else the builtin call `$slow`'s.
         macro_rules! fast_or_slow {
             ($run:lifetime, $fast:expr, $slow:expr) => {
@@ -340,23 +401,29 @@ impl Vm {
                     Some(v) => v,
                     None => match cold(|| $slow) {
                         Ok(v) => v,
-                        Err(e) => fail!($run, e),
+                        Err(e) => {
+                            sync!();
+                            fail!($run, e)
+                        }
                     },
                 }
             };
         }
+        // An inlined primitive of one or two arguments (`Op::Car` and the
+        // rest): `$fast` gives the result from the arguments if it can,
+        // else the builtin `$slow` is called on them. `$run` is the
+        // instruction loop's label, as for `fail!`.
+        macro_rules! inline1 {
+            ($run:lifetime, $fast:expr, $slow:expr) => {{
+                let a = at!(sp - 1);
+                set!(sp - 1, fast_or_slow!($run, $fast(a), $slow(heap, &[a])));
+            }};
+        }
         macro_rules! inline2 {
-            ($run:lifetime, $fast:expr, $slow:path) => {{
-                let b = self.stack.pop().unwrap();
-                let a = *self.stack.last().unwrap();
-                let v = match $fast(a, b) {
-                    Some(v) => v,
-                    None => match $slow(heap, &[a, b]) {
-                        Ok(v) => v,
-                        Err(e) => fail!($run, e),
-                    },
-                };
-                *self.stack.last_mut().unwrap() = v;
+            ($run:lifetime, $fast:expr, $slow:expr) => {{
+                let b = pop!();
+                let a = at!(sp - 1);
+                set!(sp - 1, fast_or_slow!($run, $fast(a, b), $slow(heap, &[a, b])));
             }};
         }
 
@@ -366,62 +433,68 @@ impl Vm {
             #[cfg(feature = "stats")]
             crate::vm::stats::record(op);
             match op {
-                Op::Const(k) => self.stack.push(t.consts[k as usize]),
-                Op::Fixnum(n) => self.stack.push(Value::fixnum(n as i64).unwrap()),
-                Op::Nil => self.stack.push(Value::NIL),
-                Op::True => self.stack.push(Value::TRUE),
-                Op::False => self.stack.push(Value::FALSE),
-                Op::Unspecified => self.stack.push(Value::UNSPECIFIED),
-                Op::Undefined => self.stack.push(Value::UNDEFINED),
-                Op::LocalRef(i) => self.stack.push(self.stack[fp + i as usize]),
-                Op::LocalSet(i) => self.stack[fp + i as usize] = self.stack.pop().unwrap(),
-                Op::FreeRef(i) => self.stack.push(free[i as usize].get()),
+                Op::Const(k) => push!(t.consts[k as usize]),
+                Op::Fixnum(n) => push!(Value::fixnum(n as i64).unwrap()),
+                Op::Nil => push!(Value::NIL),
+                Op::True => push!(Value::TRUE),
+                Op::False => push!(Value::FALSE),
+                Op::Unspecified => push!(Value::UNSPECIFIED),
+                Op::Undefined => push!(Value::UNDEFINED),
+                Op::LocalRef(i) => push!(at!(fp + i as usize)),
+                Op::LocalSet(i) => {
+                    let v = pop!();
+                    set!(fp + i as usize, v);
+                }
+                Op::FreeRef(i) => push!(free[i as usize].get()),
                 Op::PatchFree(closure_slot, i, value_slot) => {
-                    let Some(Obj::Closure { free, .. }) = self.stack[fp + closure_slot as usize].as_obj().map(|o| &o.kind) else {
+                    let Some(Obj::Closure { free, .. }) = at!(fp + closure_slot as usize).as_obj().map(|o| &o.kind) else {
                         unreachable!("PatchFree of a non-closure")
                     };
-                    free[i as usize].set(self.stack[fp + value_slot as usize]);
+                    free[i as usize].set(at!(fp + value_slot as usize));
                 }
                 Op::MakeBox(i) => {
                     let slot = fp + i as usize;
-                    self.stack[slot] = heap.make_box(self.stack[slot]);
+                    set!(slot, heap.make_box(at!(slot)));
                 }
                 Op::BoxRef => {
-                    let v = box_contents(self.stack.pop().unwrap()).get();
+                    let v = box_contents(pop!()).get();
                     if v.is_undefined() {
+                        sync!();
                         fail!('run, format!("variable used before its initialisation: {}", boxed_name(t, ip)));
                     }
-                    self.stack.push(v);
+                    push!(v);
                 }
                 Op::BoxSet => {
-                    let v = self.stack.pop().unwrap();
-                    box_contents(self.stack.pop().unwrap()).set(v);
+                    let v = pop!();
+                    box_contents(pop!()).set(v);
                 }
                 Op::GlobalRef(k) => {
                     let cell = t.consts[k as usize].as_ref().unwrap();
                     let v = cell_value(cell).get();
                     if v.is_undefined() {
+                        sync!();
                         fail!('run, format!("unbound variable: {}", print_value(cell_name(cell))));
                     }
-                    self.stack.push(v);
+                    push!(v);
                 }
                 Op::GlobalSet(k) => {
                     let cell = t.consts[k as usize].as_ref().unwrap();
                     if cell_value(cell).get().is_undefined() {
+                        sync!();
                         fail!('run, format!("set!: unbound variable: {}", print_value(cell_name(cell))));
                     }
-                    cell_value(cell).set(self.stack.pop().unwrap());
+                    cell_value(cell).set(pop!());
                 }
                 Op::GlobalDefine(k) => {
                     let cell = t.consts[k as usize].as_ref().unwrap();
-                    cell_value(cell).set(self.stack.pop().unwrap());
-                    self.stack.push(cell_name(cell));
+                    cell_value(cell).set(pop!());
+                    push!(cell_name(cell));
                 }
                 Op::Jump(target) => ip = target as usize,
                 Op::JumpIfNot(test, target) => {
-                    let at = self.stack.len() - test.arity();
-                    let a = self.stack[at];
-                    let b = self.stack.get(at + 1).copied().unwrap_or(Value::NIL);
+                    let at = sp - test.arity();
+                    let a = at!(at);
+                    let b = if test.arity() == 2 { at!(at + 1) } else { Value::NIL };
                     let fast = match test {
                         Test::NullP => Some(a.is_nil()),
                         Test::PairP => Some(pair_of(a).is_some()),
@@ -434,36 +507,46 @@ impl Vm {
                     };
                     let holds = match fast {
                         Some(holds) => holds,
-                        None => match cold(|| test_fallback(test)(heap, &self.stack[at..])) {
+                        None => match cold(|| test_fallback(test)(heap, slots!(at))) {
                             Ok(v) => v.is_true(),
-                            Err(e) => fail!('run, e),
+                            Err(e) => {
+                                sync!();
+                                fail!('run, e)
+                            }
                         },
                     };
-                    self.stack.truncate(at);
+                    sp = at;
                     if !holds {
                         ip = target as usize;
                     }
                 }
                 Op::JumpIfFalse(target) => {
-                    if !self.stack.pop().unwrap().is_true() {
+                    if !pop!().is_true() {
                         ip = target as usize;
                     }
                 }
                 Op::Pop => {
-                    self.stack.pop();
+                    let _ = pop!();
                 }
                 Op::Slide(n) => {
-                    let v = self.stack.pop().unwrap();
-                    self.stack.truncate(self.stack.len() - n as usize);
-                    self.stack.push(v);
+                    let v = pop!();
+                    sp -= n as usize;
+                    push!(v);
                 }
                 Op::MakeClosure(k) => {
                     let template = t.consts[k as usize].as_ref().unwrap();
-                    let at = self.stack.len() - template_of(template).nfree as usize;
-                    let c = heap.closure(template, self.stack.drain(at..));
-                    self.stack.push(c);
+                    let at = sp - template_of(template).nfree as usize;
+                    let c = heap.closure(template, slots!(at).iter().copied());
+                    sp = at;
+                    push!(c);
                 }
                 Op::Call(argc) | Op::TailCall(argc) => {
+                    // Calls work on `self.stack`, through the slower paths
+                    // that `apply`, continuations and errors share; `sp` is
+                    // reloaded once the callee is entered. A path that ends
+                    // working on `sp` itself (a return) continues the loop
+                    // directly instead.
+                    sync!();
                     let tail = matches!(op, Op::TailCall(_));
                     self.safepoint(heap, closure);
                     let base = self.stack.len() - argc as usize - 1;
@@ -477,7 +560,7 @@ impl Vm {
                                 let base = if tail {
                                     // Slide the callee and its arguments down to
                                     // where the current procedure's callee slot is.
-                                    self.stack.drain(fp - 1..base);
+                                    self.stack.remove_range(fp - 1, base);
                                     fp - 1
                                 } else {
                                     base
@@ -549,10 +632,14 @@ impl Vm {
                                     continue;
                                 }
                                 _ => match self.call_primitive(heap, p, base) {
-                                    Ok(result) if tail => do_return!(result),
+                                    Ok(result) if tail => {
+                                        do_return!(result);
+                                        continue 'run;
+                                    }
                                     Ok(result) => {
-                                        self.stack.truncate(base);
-                                        self.stack.push(result);
+                                        sp = base;
+                                        push!(result);
+                                        continue 'run;
                                     }
                                     Err(e) => fail!('run, e),
                                 },
@@ -563,7 +650,9 @@ impl Vm {
                                 self.stack.extend_from_slice(stack);
                                 self.frames.clear();
                                 self.frames.extend_from_slice(frames);
+                                reload!();
                                 resume!(v);
+                                continue 'run;
                             }
                             Some(Obj::Escape { stack_len, frames_len, frame }) => {
                                 let (stack_len, frames_len, frame) = (*stack_len, *frames_len, *frame);
@@ -575,21 +664,26 @@ impl Vm {
                                     fail!('run, "escape continuation invoked after its extent has ended");
                                 }
                                 let v = self.arguments_as_value(heap, base);
-                                self.stack.truncate(stack_len);
                                 self.frames.truncate(frames_len + frame.is_some() as usize);
+                                sp = stack_len;
                                 resume!(v);
+                                continue 'run;
                             }
                             _ => fail!('run, format!("not a procedure: {}", print_value(f))),
                         }
+                        reload!();
                         break;
                     }
                 }
-                Op::Return => do_return!(self.stack.pop().unwrap()),
+                Op::Return => do_return!(pop!()),
                 Op::SelfTailCall(n) => {
                     // A loop must reach a safepoint, as a TailCall would.
+                    sync!();
                     self.safepoint(heap, closure);
-                    let args = self.stack.len() - n as usize;
-                    self.stack.drain(fp..args);
+                    let args = sp - n as usize;
+                    // SAFETY: both ranges are below `sp`.
+                    unsafe { std::ptr::copy(sb.add(args), sb.add(fp), n as usize) };
+                    sp = fp + n as usize;
                     ip = 0;
                 }
                 Op::Car => inline1!('run, |a: Value| pair_of(a).map(|(car, _)| car.get()), list::car),
@@ -627,14 +721,12 @@ impl Vm {
                 Op::VectorLength => inline1!('run, |a| vector_of(a).and_then(|items| Value::fixnum(items.len() as i64)), vector::vector_length),
                 Op::VectorRef => inline2!('run, |a, b| element(a, b).map(std::cell::Cell::get), vector::vector_ref),
                 Op::CarLocal(i) => {
-                    let a = self.stack[fp + i as usize];
-                    let v = fast_or_slow!('run, pair_of(a).map(|(car, _)| car.get()), list::car(heap, &[a]));
-                    self.stack.push(v);
+                    let a = at!(fp + i as usize);
+                    push!(fast_or_slow!('run, pair_of(a).map(|(car, _)| car.get()), list::car(heap, &[a])));
                 }
                 Op::CdrLocal(i) => {
-                    let a = self.stack[fp + i as usize];
-                    let v = fast_or_slow!('run, pair_of(a).map(|(_, cdr)| cdr.get()), list::cdr(heap, &[a]));
-                    self.stack.push(v);
+                    let a = at!(fp + i as usize);
+                    push!(fast_or_slow!('run, pair_of(a).map(|(_, cdr)| cdr.get()), list::cdr(heap, &[a])));
                 }
                 Op::AddImm(k) => {
                     let b = Value::fixnum(k as i64).unwrap();
@@ -651,7 +743,7 @@ impl Vm {
                     }, |h, args: &[Value]| number::sub(h, &[args[0], b]))
                 }
                 Op::JumpIfNotImm(test, k, target) => {
-                    let a = self.stack.pop().unwrap();
+                    let a = pop!();
                     let b = Value::fixnum(k as i64).unwrap();
                     let holds = fast_or_slow!('run, compare(test, a, b).map(Value::bool), test_fallback(test)(heap, &[a, b]));
                     if !holds.is_true() {
@@ -659,17 +751,18 @@ impl Vm {
                     }
                 }
                 Op::VectorSet => {
-                    let at = self.stack.len() - 3;
-                    match element(self.stack[at], self.stack[at + 1]) {
-                        Some(cell) => cell.set(self.stack[at + 2]),
+                    let at = sp - 3;
+                    match element(at!(at), at!(at + 1)) {
+                        Some(cell) => cell.set(at!(at + 2)),
                         None => {
-                            if let Err(e) = vector::vector_set(heap, &self.stack[at..]) {
+                            if let Err(e) = cold(|| vector::vector_set(heap, slots!(at))) {
+                                sync!();
                                 fail!('run, e);
                             }
                         }
                     }
-                    self.stack.truncate(at);
-                    self.stack.push(Value::UNSPECIFIED);
+                    sp = at;
+                    push!(Value::UNSPECIFIED);
                 }
             }
         }
@@ -757,8 +850,11 @@ impl Vm {
         }
         let list = self.stack.pop().unwrap();
         let items = list_to_vec(list).ok_or_else(|| format!("apply: not a proper list: {}", print_value(list)))?;
+        if self.stack.len() + items.len() > self.stack.limit() {
+            return Err(stack_overflow());
+        }
         self.stack.remove(base);
-        self.stack.extend(items);
+        self.stack.extend_from_slice(&items);
         Ok(())
     }
 
@@ -777,6 +873,13 @@ impl Vm {
             PrimFn::Apply | PrimFn::CallCc | PrimFn::CallEc | PrimFn::Eval => unreachable!("handled by the call instructions"),
         }
     }
+}
+
+/// The error when a program's stack is full. It ends the top-level form:
+/// handling it would need more stack.
+#[cold]
+fn stack_overflow() -> String {
+    "stack overflow".to_string()
 }
 
 /// The procedure `name` in the system environment, if `scheme/core.scm` has
