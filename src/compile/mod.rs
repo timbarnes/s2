@@ -1,19 +1,25 @@
 //! The compiler: datum → core AST → template (plan/03 §1).
 
+#[cfg(feature = "rust-compiler")]
 pub mod analyze;
 pub mod ast;
+#[cfg(feature = "rust-compiler")]
 pub mod codegen;
 pub mod data;
 pub mod prims;
 pub mod disasm;
+#[cfg(feature = "rust-compiler")]
 pub mod expand;
 pub mod syntax_rules;
 
+#[cfg(feature = "rust-compiler")]
 use crate::heap::{GcRef, Heap};
+#[cfg(feature = "rust-compiler")]
 use crate::value::Value;
 
 /// Compile a top-level form, for the environment `env` (an
 /// `Obj::Environment`), into a template of no arguments.
+#[cfg(feature = "rust-compiler")]
 pub fn compile(heap: &mut Heap, env: GcRef, datum: Value) -> Result<GcRef, String> {
     let ast = expand::expand(heap, env, datum)?;
     Ok(generate(heap, &ast))
@@ -25,12 +31,13 @@ pub fn compile(heap: &mut Heap, env: GcRef, datum: Value) -> Result<GcRef, Strin
 /// - `roundtrip`: the Rust compiler, with its AST and templates passed
 ///   through their forms as Scheme data and back, to check those
 ///   conversions;
-/// - `scheme`: the code generator in Scheme (`scheme/compiler/`), where
-///   the VM can call it: the REPL, `-e`, `-f`, programs and `--compile`
-///   (main.rs). Library files and `eval` compile inside a primitive, where
-///   the VM can't be entered, so they keep the Rust compiler until every
-///   compile is driven from Scheme (P13.4).
+/// - `scheme`: the compiler in Scheme (`scheme/compiler/`), for every
+///   compile (main.rs). The Rust compiler still builds the images s2
+///   starts from, when they are stale.
+///
+/// Without the `rust-compiler` feature, only `scheme`, the default then.
 #[derive(Clone, Copy, PartialEq)]
+#[cfg_attr(not(feature = "rust-compiler"), allow(dead_code))]
 pub enum Compiler {
     Rust,
     RoundTrip,
@@ -40,18 +47,23 @@ pub enum Compiler {
 pub fn compiler() -> Compiler {
     static CHOICE: std::sync::OnceLock<Compiler> = std::sync::OnceLock::new();
     *CHOICE.get_or_init(|| match std::env::var("S2_COMPILER").as_deref() {
+        #[cfg(feature = "rust-compiler")]
         Err(_) | Ok("rust") => Compiler::Rust,
+        #[cfg(feature = "rust-compiler")]
         Ok("roundtrip") => Compiler::RoundTrip,
+        #[cfg(not(feature = "rust-compiler"))]
+        Err(_) => Compiler::Scheme,
         Ok("scheme") => Compiler::Scheme,
         Ok(other) => {
-            eprintln!("s2: S2_COMPILER must be rust, roundtrip or scheme, not {}", other);
+            let choices = if cfg!(feature = "rust-compiler") { "rust, roundtrip or scheme" } else { "scheme (s2 was built without the Rust compiler)" };
+            eprintln!("s2: S2_COMPILER must be {}, not {}", choices, other);
             std::process::exit(2)
         }
     })
 }
 
-/// Generate the code for a top-level form's AST, in Rust (for `scheme`,
-/// where the Scheme compiler can't be called).
+/// Generate the code for a top-level form's AST, in Rust.
+#[cfg(feature = "rust-compiler")]
 pub fn generate(heap: &mut Heap, ast: &ast::Expr) -> GcRef {
     match compiler() {
         Compiler::Rust | Compiler::Scheme => codegen::codegen(heap, ast),

@@ -454,6 +454,22 @@ The largest sub-phase, built in steps, each tested before the switch:
   `--no-default-features` (no Rust compiler), s2 starts from a stage-2
   image and passes all tests.
 
+**Changed in P13.5:**
+
+- **Where a build without the Rust compiler gets its images:** from a
+  default build (C5's option a, kept), which writes them with
+  `--core-image` and `--compiler-image`, compiled by the compiler in
+  Scheme. They go next to the executable, or `S2_CORE_IMAGE` and
+  `S2_COMPILER_IMAGE` name them. Without the Rust compiler nothing can
+  rebuild an image at startup, so the image is used however old it is.
+  The alternative, committed boot images (option b), is still P13.6's
+  decision.
+- **`pending_load` stays, behind the feature**, not deleted: it goes
+  when the Rust compiler does. The fasl reader no longer uses it: a
+  compiled file that needs a library returns `Loaded::Needs(file)`.
+- **`dis` goes through the compiler in Scheme** too, like `eval`
+  (P13.4 missed it).
+
 ### P13.6. Measurement and decisions
 
 - **Compile speed**, Scheme against Rust:

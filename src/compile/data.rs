@@ -24,6 +24,7 @@
 use crate::builtins::{Error, Primitive, err, kind, prim};
 use crate::compile::ast::{Expr, Lambda, Var};
 use crate::compile::syntax_rules::name as id_name;
+use crate::globals::{TopBinding, cell_name, cell_value, env_of};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
 use crate::printer::print_value;
 use crate::value::Value;
@@ -33,17 +34,20 @@ use crate::vm::{Op, Template};
 // ---------------------------------------------------------------------------
 // The AST
 
+#[cfg(feature = "rust-compiler")]
 fn tagged(heap: &mut Heap, tag: &str, fields: Vec<Value>) -> Value {
     let mut items = vec![heap.intern(tag)];
     items.extend(fields);
     heap.vector(items)
 }
 
+#[cfg(feature = "rust-compiler")]
 fn var_datum(heap: &mut Heap, v: &Var) -> Value {
     let id = Value::fixnum(v.id as i64).unwrap();
     tagged(heap, "var", vec![id, v.name])
 }
 
+#[cfg(feature = "rust-compiler")]
 fn bindings_datum(heap: &mut Heap, bindings: &[(Var, Expr)]) -> Value {
     let pairs = bindings
         .iter()
@@ -55,6 +59,7 @@ fn bindings_datum(heap: &mut Heap, bindings: &[(Var, Expr)]) -> Value {
     heap.list(pairs)
 }
 
+#[cfg(feature = "rust-compiler")]
 /// The AST `e` as tagged vectors.
 pub fn expr_to_datum(heap: &mut Heap, e: &Expr) -> Value {
     let id = |id: u32| Value::fixnum(id as i64).unwrap();
@@ -362,6 +367,7 @@ pub fn make_template(heap: &mut Heap, f: TemplateFields) -> Result<GcRef, String
     }))
 }
 
+#[cfg(feature = "rust-compiler")]
 /// A template's fields as data, the arguments `%make-template` takes, with
 /// its inner templates (constants) also taken apart and remade, for the
 /// round trip check.
@@ -422,6 +428,21 @@ fn template_fields(a: &[Value]) -> Result<TemplateFields, Error> {
     })
 }
 
+/// The inlined instruction for a call to the global `cell` with `argc`
+/// arguments, if it is one: `cell` must be the system environment's
+/// binding of a standard procedure that has one. Those cells never change
+/// (user code can't assign an imported name, and a `define` of one makes a
+/// new cell), so the inlined code means exactly what the call does.
+pub fn inline_op(heap: &Heap, cell: GcRef, argc: usize) -> Option<Op> {
+    let Some(Obj::Primitive(p)) = cell_value(cell).get().as_obj().map(|o| &o.kind) else { return None };
+    let name = cell_name(cell).as_ref()?;
+    let system = env_of(heap.system?).borrow().lookup(name);
+    if system != Some(TopBinding::Variable(cell)) {
+        return None;
+    }
+    Op::inline(p.name, argc)
+}
+
 pub static PRIMITIVES: &[Primitive] = &[
     // (%make-template name required rest? nfree #(instruction ...) #(constant ...)
     //                 #(local-name ...) #(free-name ...))
@@ -434,10 +455,18 @@ pub static PRIMITIVES: &[Primitive] = &[
     prim("%inline-instruction", 2, Some(2), |h, a| {
         let cell = cell(a[0]).map_err(Error::from)?;
         let argc = a[1].as_fixnum().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| err!("%inline-instruction: bad argument count: {}", print_value(a[1])))?;
-        Ok(match crate::compile::codegen::inline_op(h, cell, argc) {
+        Ok(match inline_op(h, cell, argc) {
             Some(op) => op_to_datum(h, op),
             None => Value::FALSE,
         })
+    }),
+    // (%disassemble t): print a template's code, as dis does.
+    prim("%disassemble", 1, Some(1), |h, a| match kind(a[0]) {
+        Some(Obj::Template(_)) => {
+            crate::io::write_stdout(h, &crate::compile::disasm::disassemble(a[0].as_ref().unwrap()));
+            Ok(Value::UNSPECIFIED)
+        }
+        _ => Err(err!("%disassemble: not a template: {}", print_value(a[0]))),
     }),
     // (%template->procedure t): a top-level form's template, as a procedure
     // of no arguments that runs it.

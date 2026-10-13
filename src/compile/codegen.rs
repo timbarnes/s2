@@ -22,27 +22,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::compile::analyze::{boxed_variables, free_variables, lambda_group};
 use crate::compile::ast::{Expr, Lambda, Var, VarId};
-use crate::globals::{TopBinding, cell_name, cell_value, env_of};
-use crate::heap::{GcRef, Heap, Obj};
+use crate::compile::data::inline_op;
+use crate::heap::{GcRef, Heap};
 use crate::printer::print_value;
 use crate::value::Value;
 use crate::vm::op::Test;
 use crate::vm::{Op, Template};
 
-/// The inlined instruction for a call to the global `cell` with `argc`
-/// arguments, if it is one: `cell` must be the system environment's
-/// binding of a standard procedure that has one. Those cells never change
-/// (user code can't assign an imported name, and a `define` of one makes a
-/// new cell), so the inlined code means exactly what the call does.
-pub fn inline_op(heap: &Heap, cell: GcRef, argc: usize) -> Option<Op> {
-    let Some(Obj::Primitive(p)) = cell_value(cell).get().as_obj().map(|o| &o.kind) else { return None };
-    let name = cell_name(cell).as_ref()?;
-    let system = env_of(heap.system?).borrow().lookup(name);
-    if system != Some(TopBinding::Variable(cell)) {
-        return None;
-    }
-    Op::inline(p.name, argc)
-}
 
 /// Compile a top-level form into a template of no arguments.
 pub fn codegen(heap: &mut Heap, e: &Expr) -> GcRef {

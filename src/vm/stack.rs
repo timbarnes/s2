@@ -78,6 +78,7 @@ impl Stack {
         Some(v)
     }
 
+    #[cfg(feature = "rust-compiler")]
     pub fn truncate(&mut self, len: usize) {
         self.len = self.len.min(len);
     }
@@ -98,6 +99,7 @@ impl Stack {
         v
     }
 
+    #[cfg(any(test, feature = "rust-compiler"))]
     pub fn insert(&mut self, i: usize, v: Value) {
         self.push(v);
         self[i..].rotate_right(1);

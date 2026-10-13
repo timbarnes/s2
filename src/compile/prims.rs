@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use crate::builtins::{Error, Primitive, err, expected, kind, list_arg, prim};
-use crate::compile::expand::CORE_FORMS;
+use crate::globals::CORE_FORMS;
 use crate::compile::syntax_rules::{SyntaxRules, identifier, strip_datum};
 use crate::globals::{Env, TopBinding, cell_value, env_of};
 use crate::heap::{GcRef, Heap, Obj};

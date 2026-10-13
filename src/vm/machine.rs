@@ -44,6 +44,7 @@
 //! Only an error nobody handles comes out of `run`, through `%abort`.
 
 use crate::builtins::{Error, ErrorKind, PrimFn, Primitive, list, number, predicate, standard_ports, vector};
+#[cfg(feature = "rust-compiler")]
 use crate::compile;
 use crate::globals::{TopBinding, cell_name, cell_value, env_of};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
@@ -647,6 +648,11 @@ impl Vm {
                                     self.stack[base + 1] = k;
                                     continue;
                                 }
+                                // With the compiler in Scheme, s2 binds eval to its
+                                // eval-form instead.
+                                #[cfg(not(feature = "rust-compiler"))]
+                                PrimFn::Eval => fail!('run, "eval: the compiler isn't loaded"),
+                                #[cfg(feature = "rust-compiler")]
                                 PrimFn::Eval => {
                                     let n = self.stack.len() - base - 1;
                                     if n != 2 {

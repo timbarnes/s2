@@ -45,7 +45,7 @@ use num_bigint::BigInt;
 use num_rational::BigRational;
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::compile::expand::CORE_FORMS;
+use crate::globals::CORE_FORMS;
 use crate::compile::syntax_rules::SyntaxRules;
 use crate::globals::{Env, TopBinding, env_of};
 use crate::heap::{GcRef, Heap, Obj};

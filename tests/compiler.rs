@@ -16,6 +16,9 @@
 //! Also here: compiling a file gives the same bytes every time, however
 //! the heap was used (P13.0).
 
+// The oracle compares with the Rust compiler.
+#![cfg(feature = "rust-compiler")]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

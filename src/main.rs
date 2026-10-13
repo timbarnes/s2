@@ -73,7 +73,7 @@ const COMPILER_FILES: &[&str] = &[
 /// `(s2 compiler)`'s source: a `define-library` around `COMPILER_FILES`.
 fn compiler_source() -> String {
     format!(
-        "(define-library (s2 compiler) (export expand codegen eval-form load-library) (import (scheme base) (scheme cxr) (scheme repl) (scheme write) (s2)) (begin {}))",
+        "(define-library (s2 compiler) (export expand codegen eval-form load-library dis-form) (import (scheme base) (scheme cxr) (scheme repl) (scheme write) (s2)) (begin {}))",
         COMPILER_FILES.join("\n")
     )
 }
@@ -102,27 +102,17 @@ impl Session {
         heap.interaction = Some(system);
         let vm = vm::Vm::new(&mut heap);
         let mut s = Session { heap, env: system, vm, dis: false, expand: false, scheme: None };
-        s.load_image(CORE_SCM, "s2-core.s2o");
+        s.load_image(CORE_SCM, "s2-core.s2o", "S2_CORE_IMAGE");
         libraries::register_standard_libraries(&mut s.heap, system);
         if compile::compiler() == compile::Compiler::Scheme {
-            // S2_COMPILER_IMAGE names an image to load the compiler from,
-            // instead of the cached one.
-            match std::env::var_os("S2_COMPILER_IMAGE") {
-                Some(path) => {
-                    let loaded = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| s.run_image(&bytes));
-                    if let Err(e) = loaded {
-                        panic!("{}: {}", path.to_string_lossy(), e);
-                    }
-                }
-                None => s.load_image(&compiler_source(), "s2-compiler.s2o"),
-            }
+            s.load_image(&compiler_source(), "s2-compiler.s2o", "S2_COMPILER_IMAGE");
             let expand = s.library_procedure(&["s2", "compiler"], "expand");
             let codegen = s.library_procedure(&["s2", "compiler"], "codegen");
             s.scheme = Some((expand, codegen));
             // Every compile through the compiler in Scheme (plan/08, C6):
             // eval and %load-library, which load, imports and library
-            // files go through, become its own.
-            for (name, export) in [("eval", "eval-form"), ("%load-library", "load-library")] {
+            // files go through, and dis, become its own.
+            for (name, export) in [("eval", "eval-form"), ("%load-library", "load-library"), ("dis", "dis-form")] {
                 let f = s.library_procedure(&["s2", "compiler"], export);
                 let name = s.heap.intern(name).as_ref().unwrap();
                 let Some(globals::TopBinding::Variable(cell)) = env_of(system).borrow().lookup(name) else { unreachable!() };
@@ -142,25 +132,48 @@ impl Session {
     }
 
     /// Load Scheme source built into s2 (`scheme/core.scm`, the compiler)
-    /// into the system environment: from its compiled image, cached next to
-    /// the executable as `image_name`, if that is fresh; otherwise compile
-    /// and run it form by form, and write the image for next time (plan/04
-    /// P11).
-    fn load_image(&mut self, source: &str, image_name: &str) {
-        let system = self.heap.system.unwrap();
+    /// into the system environment, from its compiled image: the file the
+    /// environment variable `variable` names, if it is set; otherwise the
+    /// one cached next to the executable as `image_name`, if that is fresh.
+    /// If not, compile and run the source form by form, and write the image
+    /// for next time (plan/04 P11). Without the Rust compiler nothing can
+    /// compile it here, so the cached image is used however old it is.
+    fn load_image(&mut self, source: &str, image_name: &str, variable: &str) {
+        let named = std::env::var_os(variable).map(std::path::PathBuf::from);
         let image = std::env::current_exe().map(|exe| exe.with_file_name(image_name)).ok();
-        let cached = image.as_deref().and_then(|p| fasl::read_cached(&mut self.heap, system, p));
-        let result = match cached {
-            Some(fasl::Loaded::Code(templates)) => self.run_templates(&templates),
-            _ => self.build_image(source).map(|bytes| {
-                if let Some(image) = image {
-                    fasl::write_cache(&image, &bytes);
+        let result = match (named, image) {
+            (Some(path), _) => self.run_image_file(&path),
+            #[cfg(not(feature = "rust-compiler"))]
+            (None, Some(path)) => {
+                let _ = source;
+                self.run_image_file(&path).map_err(|e| {
+                    format!("{}: s2 was built without the Rust compiler, so it needs an image made by one with it (--core-image, --compiler-image)", e)
+                })
+            }
+            #[cfg(feature = "rust-compiler")]
+            (None, image) => {
+                let system = self.heap.system.unwrap();
+                match image.as_deref().and_then(|p| fasl::read_cached(&mut self.heap, system, p)) {
+                    Some(fasl::Loaded::Code(templates)) => self.run_templates(&templates),
+                    _ => self.build_image(source).map(|bytes| {
+                        if let Some(image) = image {
+                            fasl::write_cache(&image, &bytes);
+                        }
+                    }),
                 }
-            }),
+            }
+            #[cfg(not(feature = "rust-compiler"))]
+            (None, None) => Err("can't find the executable's directory".into()),
         };
         if let Err(e) = result {
             panic!("{}: {}", image_name, e);
         }
+    }
+
+    /// Load and run the image in the file `path`.
+    fn run_image_file(&mut self, path: &Path) -> Result<(), String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        self.run_image(&bytes)
     }
 
     /// Compile and run `source` form by form in the system environment,
@@ -281,8 +294,10 @@ impl Session {
     /// chose it, else in Rust.
     fn compile(&mut self, datum: Value) -> Result<GcRef, String> {
         let Some((expand, codegen)) = self.scheme else {
-            let ast = self.expand(datum)?;
-            return self.generate(&ast);
+            #[cfg(feature = "rust-compiler")]
+            return self.expand(datum).and_then(|ast| self.generate(&ast));
+            #[cfg(not(feature = "rust-compiler"))]
+            return Err("the compiler isn't loaded".into());
         };
         let env = Value::obj(self.env);
         // Each call holds its arguments, so they survive its collections.
@@ -312,6 +327,7 @@ impl Session {
 
     /// Expand one top-level form. If it imports a library whose file
     /// hasn't been loaded, load the file and try again.
+    #[cfg(feature = "rust-compiler")]
     fn expand(&mut self, datum: Value) -> Result<compile::ast::Expr, String> {
         loop {
             match compile::expand::expand(&mut self.heap, self.env, datum) {
@@ -332,6 +348,7 @@ impl Session {
 
     /// Generate a form's code in Rust, printing its AST and code for
     /// `--expand` and `--dis`.
+    #[cfg(feature = "rust-compiler")]
     fn generate(&mut self, ast: &compile::ast::Expr) -> Result<GcRef, String> {
         if self.expand {
             io::write_stdout(&self.heap, &format!("{}\n", compile::ast::show(ast)));
@@ -1056,6 +1073,7 @@ mod tests {
 
     /// `--expand` output: the core AST, with renamed variables numbered.
     #[test]
+    #[cfg(feature = "rust-compiler")]
     fn expand_shows_the_core_ast() {
         let mut s = Session::new();
         let mut show = |src: &str| {

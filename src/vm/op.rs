@@ -138,6 +138,7 @@ pub enum Test {
 
 impl Test {
     /// The test an inlined instruction makes, if it is one.
+    #[cfg(feature = "rust-compiler")]
     pub fn of(op: Op) -> Option<Test> {
         Some(match op {
             Op::NullP => Test::NullP,

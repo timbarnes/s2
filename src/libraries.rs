@@ -22,7 +22,9 @@ use std::path::{Path, PathBuf};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins::{Error, Primitive, err, expected, kind, list_arg, prim, string_arg};
+#[cfg(feature = "rust-compiler")]
 use crate::compile::generate;
+#[cfg(feature = "rust-compiler")]
 use crate::compile::expand::expand;
 use crate::compile::syntax_rules::{identifier, name as id_name, strip};
 use crate::fasl;
@@ -53,8 +55,9 @@ pub struct Library {
 pub struct Libraries {
     table: FxHashMap<LibraryName, Library>,
     loaded: FxHashSet<PathBuf>,
-    /// A library file an import needs loaded before it can be expanded
-    /// (see the module comment).
+    /// A library file an import needs loaded before the Rust expander can
+    /// expand it (see the module comment).
+    #[cfg(feature = "rust-compiler")]
     pub pending_load: Option<PathBuf>,
     /// While a library file is compiled: every file read, for the compiled
     /// file's staleness check.
@@ -308,7 +311,10 @@ pub fn library_to_load(heap: &Heap, name: &LibraryName, who: &str) -> Result<Opt
 fn find_library<'a>(heap: &'a mut Heap, name: &LibraryName, who: &str) -> Result<&'a Library, String> {
     if let Some(path) = library_to_load(heap, name, who)? {
         let message = format!("{}: loading {}", who, path.display());
-        heap.libraries.pending_load = Some(path);
+        #[cfg(feature = "rust-compiler")]
+        {
+            heap.libraries.pending_load = Some(path);
+        }
         return Err(message);
     }
     Ok(heap.libraries.get(name).unwrap())
@@ -372,6 +378,7 @@ pub fn resolve_import_set(heap: &mut Heap, set: Value, who: &str) -> Result<Vec<
 // ---------------------------------------------------------------------------
 // define-library declarations and include
 
+#[cfg(feature = "rust-compiler")]
 /// What a `define-library`'s declarations add up to.
 #[derive(Default)]
 pub struct Declarations {
@@ -383,6 +390,7 @@ pub struct Declarations {
     pub body: Vec<Value>,
 }
 
+#[cfg(feature = "rust-compiler")]
 /// Add the library declarations `decls` to `out`, expanding
 /// `include-library-declarations` and `cond-expand`. Declarations are
 /// recognised by name, as in s1: they aren't bindings anywhere.
@@ -445,6 +453,7 @@ pub fn read_file_forms(heap: &mut Heap, name: &str, fold_case: bool, who: &str) 
     }
 }
 
+#[cfg(feature = "rust-compiler")]
 /// The forms of the files named by `files`, strings, in order: what
 /// `include` and `include-ci` splice in.
 pub fn include_forms(heap: &mut Heap, files: &[Value], fold_case: bool, who: &str) -> Result<Vec<Value>, String> {
@@ -503,6 +512,7 @@ fn thunks(heap: &mut Heap, templates: Vec<GcRef>) -> Value {
     heap.list(thunks)
 }
 
+#[cfg(feature = "rust-compiler")]
 /// The compiled code of the library file `path`, from `foo/bar.s2o` next
 /// to `foo/bar.sld` if that is fresh (`fasl::fresh`), or else compiled now
 /// and cached there. Compiling doesn't run anything, so the file's forms
@@ -590,6 +600,7 @@ fn feature_names() -> Vec<String> {
     names
 }
 
+#[cfg(feature = "rust-compiler")]
 /// Whether a cond-expand requirement holds: a feature identifier,
 /// `(library name)` for a library that is registered or has a file on the
 /// search path, or `and` / `or` / `not` of requirements.
@@ -632,6 +643,7 @@ fn requirement_holds(heap: &Heap, req: Value, features: &[String], who: &str) ->
     }
 }
 
+#[cfg(feature = "rust-compiler")]
 /// The body of the first cond-expand clause whose requirement holds (an
 /// `else` clause, last, always does), or nothing if none does.
 pub fn choose_cond_expand_clause(heap: &Heap, clauses: &[Value], who: &str) -> Result<Vec<Value>, String> {
@@ -663,7 +675,10 @@ pub static PRIMITIVES: &[Primitive] = &[
         for &set in a {
             let resolved = resolve_import_set(h, set, "environment");
             // environment doesn't load library files (as in s1).
-            h.libraries.pending_load = None;
+            #[cfg(feature = "rust-compiler")]
+            {
+                h.libraries.pending_load = None;
+            }
             bindings.extend(resolved?);
         }
         Ok(environment_value(h, bindings))
@@ -759,16 +774,24 @@ pub static PRIMITIVES: &[Primitive] = &[
     }),
     // For %load-library: the library file's code, compiled, as a list of
     // procedures to call in order; or the file of a library it needs
-    // loaded first; or #f if it can't be compiled ahead.
+    // loaded first; or #f if it can't be compiled ahead. Without the Rust
+    // compiler it is never called, but stays bound, so that core.scm, which
+    // refers to it, compiles to the same image in either build.
     prim("%compiled-library", 1, Some(1), |h, a| {
         let path = string_arg(a[0], "%compiled-library")?.borrow().to_string();
-        Ok(match compiled_library(h, &path) {
+        #[cfg(feature = "rust-compiler")]
+        return Ok(match compiled_library(h, &path) {
             Ok(templates) => thunks(h, templates),
             Err(_) => match h.libraries.pending_load.take() {
                 Some(needed) => h.string(&needed.to_string_lossy()),
                 None => Value::FALSE,
             },
-        })
+        });
+        #[cfg(not(feature = "rust-compiler"))]
+        {
+            let _ = h;
+            Err(err!("%compiled-library: s2 was built without the Rust compiler: {}", path))
+        }
     }),
     prim("%read-library-file", 1, Some(1), |h, a| {
         let path = string_arg(a[0], "%read-library-file")?.borrow().to_string();

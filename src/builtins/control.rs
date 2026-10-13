@@ -3,6 +3,7 @@
 //! `with-exception-handler`, `raise`, `guard` and the rest on (plan/03 §10).
 
 use super::{Error, ErrorKind, Primitive, PrimFn, err, expected, kind, prim, vm_prim};
+#[cfg(feature = "rust-compiler")]
 use crate::compile;
 use crate::heap::{Heap, Obj};
 use crate::value::Value;
@@ -54,11 +55,19 @@ fn abort(vm: &mut Vm, _: &mut Heap, args: &[Value]) -> Result<Value, Error> {
 }
 
 /// `(dis datum)`: compile `datum` as a top-level form for the interaction
-/// environment and print its disassembly, without running it.
+/// environment and print its disassembly, without running it. With the
+/// compiler in Scheme, s2 binds `dis` to its `dis-form` instead.
 fn dis(_: &mut Vm, heap: &mut Heap, args: &[Value]) -> Result<Value, Error> {
-    let env = heap.interaction.unwrap();
-    let template = compile::compile(heap, env, args[0]).map_err(|e| err!("{}", e))?;
-    let text = compile::disasm::disassemble(template);
-    crate::io::write_stdout(heap, &text);
-    Ok(Value::UNSPECIFIED)
+    #[cfg(feature = "rust-compiler")]
+    {
+        let env = heap.interaction.unwrap();
+        let template = compile::compile(heap, env, args[0]).map_err(|e| err!("{}", e))?;
+        crate::io::write_stdout(heap, &compile::disasm::disassemble(template));
+        Ok(Value::UNSPECIFIED)
+    }
+    #[cfg(not(feature = "rust-compiler"))]
+    {
+        let _ = (heap, args);
+        Err(err!("dis: the compiler isn't loaded"))
+    }
 }

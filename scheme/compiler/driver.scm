@@ -1,8 +1,9 @@
-;;; The driver (plan/08, C6): compiling a form, eval, and loading a
-;;; library file. With S2_COMPILER=scheme, s2 binds eval and
-;;; %load-library to eval-form and load-library, so every compile goes
-;;; through here. Loading never has to wait: an import of a library whose
-;;; file isn't loaded loads it there and then (find-library).
+;;; The driver (plan/08, C6): compiling a form, eval, dis, and loading a
+;;; library file. With S2_COMPILER=scheme, s2 binds eval, dis and
+;;; %load-library to eval-form, dis-form and load-library, so every
+;;; compile goes through here. Loading never has to wait: an import of a
+;;; library whose file isn't loaded loads it there and then
+;;; (find-library).
 
 (define (compile form env) (codegen (expand form env)))
 
@@ -14,6 +15,11 @@
   (if (not (environment? (cadr args)))
       (fail "eval: the second argument must be an environment"))
   ((%template->procedure (compile (car args) (cadr args)))))
+
+;; dis: compile a form for the interaction environment and print its
+;; code, without running it.
+(define (dis-form datum)
+  (%disassemble (compile datum (interaction-environment))))
 
 ;; Load a library file, for an import that needs one: marked loaded
 ;; first, so a library that imports itself can't loop. From its compiled

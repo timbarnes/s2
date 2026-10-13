@@ -31,74 +31,11 @@ use std::collections::VecDeque;
 
 use crate::compile::ast::{Expr, Lambda, Var, VarId};
 use crate::compile::syntax_rules::{self, identifier, list_parts, strip, strip_datum};
-use crate::globals::{Env, TopBinding, cell_value, env_of};
+use crate::globals::{Core, Env, TopBinding, cell_value, env_of};
 use crate::libraries::{Declarations, choose_cond_expand_clause, collect_declarations, include_forms, library_name, resolve_import_set};
 use crate::heap::{GcRef, Heap, Obj, list_to_vec};
 use crate::printer::print_value;
 use crate::value::Value;
-
-/// The forms the expander implements itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Core {
-    Quote,
-    Quasiquote,
-    Unquote,
-    UnquoteSplicing,
-    Lambda,
-    Define,
-    Set,
-    If,
-    Begin,
-    Let,
-    Letrec,
-    LetrecStar,
-    DefineSyntax,
-    LetSyntax,
-    LetrecSyntax,
-    SyntaxRules,
-    Import,
-    DefineLibrary,
-    Include,
-    IncludeCi,
-    CondExpand,
-    SyntaxError,
-    /// Auxiliary syntax (R7RS §4.3.2): `else`, `=>`, `_` and `...`. They are
-    /// bound so that they can be exported, imported and renamed, and so
-    /// that a macro's literal matches them by binding: `cond` recognises
-    /// an imported `else` renamed `otherwise`, and not a local variable
-    /// named `else`. Used as an expression, they are an error.
-    Auxiliary,
-}
-
-/// The core forms' names, bound in every top-level environment.
-pub const CORE_FORMS: &[(&str, Core)] = &[
-    ("quote", Core::Quote),
-    ("quasiquote", Core::Quasiquote),
-    ("unquote", Core::Unquote),
-    ("unquote-splicing", Core::UnquoteSplicing),
-    ("lambda", Core::Lambda),
-    ("define", Core::Define),
-    ("set!", Core::Set),
-    ("if", Core::If),
-    ("begin", Core::Begin),
-    ("let", Core::Let),
-    ("letrec", Core::Letrec),
-    ("letrec*", Core::LetrecStar),
-    ("define-syntax", Core::DefineSyntax),
-    ("let-syntax", Core::LetSyntax),
-    ("letrec-syntax", Core::LetrecSyntax),
-    ("syntax-rules", Core::SyntaxRules),
-    ("import", Core::Import),
-    ("define-library", Core::DefineLibrary),
-    ("include", Core::Include),
-    ("include-ci", Core::IncludeCi),
-    ("cond-expand", Core::CondExpand),
-    ("syntax-error", Core::SyntaxError),
-    ("else", Core::Auxiliary),
-    ("=>", Core::Auxiliary),
-    ("_", Core::Auxiliary),
-    ("...", Core::Auxiliary),
-];
 
 /// What an identifier means at a point in the code. Two identifiers are
 /// `free-identifier=?` when they resolve to the same binding (`same`).

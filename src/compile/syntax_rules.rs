@@ -13,11 +13,17 @@
 //! isn't stripped of aliases here: the expander does it when it meets
 //! `quote`, `quasiquote` or a vector constant.
 
+#[cfg(feature = "rust-compiler")]
 use std::rc::Rc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+#[cfg(feature = "rust-compiler")]
+use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 
-use crate::heap::{GcRef, Heap, Obj, equal};
+#[cfg(feature = "rust-compiler")]
+use crate::heap::equal;
+use crate::heap::{GcRef, Heap, Obj};
+#[cfg(feature = "rust-compiler")]
 use crate::printer::print_value;
 use crate::value::Value;
 
@@ -110,6 +116,7 @@ pub fn list_parts(list: Value) -> (Vec<Value>, Value) {
     (items, rest)
 }
 
+#[cfg(feature = "rust-compiler")]
 /// A vector's elements, or a list's elements and final cdr.
 fn sequence_parts(v: Value) -> (Vec<Value>, Value) {
     match kind(v) {
@@ -138,6 +145,7 @@ pub struct SyntaxRules {
     pub env: GcRef,
 }
 
+#[cfg(feature = "rust-compiler")]
 /// What a pattern variable matched: one form, or a sequence per ellipsis.
 /// The sequence is shared, because instantiating `sub ...` copies the
 /// bindings once per repetition: with a `Vec`, expanding a recursive macro
@@ -148,9 +156,11 @@ enum Match {
     Many(Rc<[Match]>),
 }
 
+#[cfg(feature = "rust-compiler")]
 /// The pattern variables of a successful match.
 pub struct Bindings(FxHashMap<GcRef, Match>);
 
+#[cfg(feature = "rust-compiler")]
 impl SyntaxRules {
     fn is_literal(&self, id: GcRef) -> bool {
         self.literals.contains(&id)
@@ -449,6 +459,7 @@ impl SyntaxRules {
     }
 }
 
+#[cfg(feature = "rust-compiler")]
 /// The pattern variables (keys of `binds`) occurring in `template`.
 fn template_vars(template: Value, binds: &FxHashMap<GcRef, Match>, out: &mut Vec<GcRef>, seen: &mut FxHashSet<GcRef>) {
     if let Some(id) = identifier(template) {
@@ -471,6 +482,7 @@ fn template_vars(template: Value, binds: &FxHashMap<GcRef, Match>, out: &mut Vec
 // Parsing and validation
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "rust-compiler")]
 /// Parse `(syntax-rules [ellipsis] (literal ...) (pattern template) ...)`,
 /// defined in a scope of `depth` frames, checking the rules are well formed.
 pub fn parse(form: Value, depth: u32, env: GcRef) -> Result<SyntaxRules, String> {
@@ -513,6 +525,7 @@ pub fn parse(form: Value, depth: u32, env: GcRef) -> Result<SyntaxRules, String>
     Ok(sr)
 }
 
+#[cfg(feature = "rust-compiler")]
 impl SyntaxRules {
     /// At most one ellipsis per list or vector level, and it must follow a
     /// pattern.
@@ -573,7 +586,7 @@ impl SyntaxRules {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rust-compiler"))]
 mod tests {
     use super::*;
     use crate::io::new_string_port_input;

@@ -15,6 +15,12 @@ rustc-hash = "1.1"
 debug = true
 
 [features]
+default = ["rust-compiler"]
+# The compiler in Rust (plan/08, P13.5). Without it, s2 compiles only with
+# the compiler in Scheme, and starts from images a build with it made:
+# s2-core.s2o and s2-compiler.s2o next to the executable, or the files
+# S2_CORE_IMAGE and S2_COMPILER_IMAGE name.
+rust-compiler = []
 # Count executed instructions, by opcode and by consecutive pair, and print
 # the counts at exit (plan/05 §7): what superinstructions would pay.
 # cargo run --release --features stats -- bench/fib.scm
