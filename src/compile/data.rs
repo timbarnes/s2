@@ -439,6 +439,12 @@ pub static PRIMITIVES: &[Primitive] = &[
             None => Value::FALSE,
         })
     }),
+    // (%template->procedure t): a top-level form's template, as a procedure
+    // of no arguments that runs it.
+    prim("%template->procedure", 1, Some(1), |h, a| match kind(a[0]) {
+        Some(Obj::Template(_)) => Ok(h.closure(a[0].as_ref().unwrap(), std::iter::empty())),
+        _ => Err(err!("%template->procedure: not a template: {}", print_value(a[0]))),
+    }),
     // The inverse, for checking: (%template-instructions t) is t's code as data.
     prim("%template-instructions", 1, Some(1), |h, a| {
         let Some(Obj::Template(t)) = kind(a[0]) else { return Err(err!("%template-instructions: not a template: {}", print_value(a[0]))) };

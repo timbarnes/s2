@@ -337,7 +337,7 @@ chibi's suite at 1154.
 | P13.1 | Codegen and analysis in Scheme | Identical `--dis` over the corpus |
 | P13.2 | (folded into P13.1) | |
 | P13.3 | The front end in Scheme: `syntax-rules`, the expander, library declarations | Identical `--expand` and `--dis` |
-| P13.4 | The driver: every compile through Scheme; `eval` and loading in Scheme; `pending_load` gone | All tests with `S2_COMPILER=scheme` |
+| P13.4 | The driver: every compile through Scheme; `eval` and loading in Scheme | All tests with `S2_COMPILER=scheme` |
 | P13.5 | Self-compilation and the image | The fixed point |
 | P13.6 | Measurement and the Rust compiler's fate | 07's tables, compile times |
 
@@ -391,9 +391,10 @@ to be thrown away a sub-phase later, and analysis is under 200 lines.
 - Macros stay Rust objects (C4 changed), so step 5 goes.
 - Step 2's separate test of the matcher was skipped. The oracle covers
   every macro use in the corpus, and it passed first time.
-- `pending_load` stays until P13.4. Library files and `eval` still
-  compile inside a primitive, with the Rust front end, which needs it.
-  The Scheme front end calls `%load-library` directly.
+- `pending_load` stays: library files and `eval` still compile inside
+  a primitive, with the Rust front end, which needs it. The Scheme front
+  end calls `%load-library` directly. (P13.4 moved its removal on to
+  P13.5.)
 
 The largest sub-phase, built in steps, each tested before the switch:
 
@@ -419,11 +420,26 @@ The largest sub-phase, built in steps, each tested before the switch:
 
 - Every caller of the compiler goes through Scheme (C6): the REPL, `-e`,
   `-f`, programs, `--compile`, `load`, library files and `eval`.
-- `pending_load` and `%load-then-eval` go (moved from P13.3).
 - Compile errors as Scheme errors (C9). Rust callers pin what they hold
   across a compile (constraint 5).
 - **Exit:** all tests with `S2_COMPILER=scheme`. The GC stress runs
   matter most here: this is where rooting bugs appear.
+
+**Changed in P13.4:**
+
+- **The two front ends stay selectable**, so the switch is two cells.
+  With `S2_COMPILER=scheme`, s2 binds the system's `eval` and
+  `%load-library` to the compiler's `eval-form` and `load-library`.
+  `load`, imports, library files, and Rust's own loading all call
+  through those cells, so no compile reaches Rust.
+- **`pending_load` and `%load-then-eval` stay, unused in that mode**,
+  for the Rust front end. They go with it, in P13.5. The fasl reader
+  uses `pending_load` too, when a compiled file needs a library loaded
+  first: it will report that need as an error value instead.
+- **A library file compiles one form at a time**, each run before the
+  next is compiled, so a later `define-library` can import an earlier
+  one. The Rust path compiles the whole file first, and falls back to
+  `eval`, form by form, if that fails.
 
 ### P13.5. Self-compilation
 
@@ -431,7 +447,8 @@ The largest sub-phase, built in steps, each tested before the switch:
   its own source to an image (stage 2). Stage 2 compiles it again
   (stage 3).
 - The cargo feature `rust-compiler`, on by default, leaves the Rust
-  compiler out when off.
+  compiler out when off. `pending_load` and `%load-then-eval` go with it
+  (moved from P13.4).
 - **Exit:** stages 1, 2 and 3 are byte-identical. Identical code (C7)
   makes this expected rather than hoped for. With
   `--no-default-features` (no Rust compiler), s2 starts from a stage-2

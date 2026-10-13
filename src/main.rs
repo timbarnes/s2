@@ -67,12 +67,13 @@ const COMPILER_FILES: &[&str] = &[
     include_str!("../scheme/compiler/syntax-rules.scm"),
     include_str!("../scheme/compiler/libraries.scm"),
     include_str!("../scheme/compiler/expand.scm"),
+    include_str!("../scheme/compiler/driver.scm"),
 ];
 
 /// `(s2 compiler)`'s source: a `define-library` around `COMPILER_FILES`.
 fn compiler_source() -> String {
     format!(
-        "(define-library (s2 compiler) (export expand codegen) (import (scheme base) (scheme cxr) (scheme write) (s2)) (begin {}))",
+        "(define-library (s2 compiler) (export expand codegen eval-form load-library) (import (scheme base) (scheme cxr) (scheme repl) (scheme write) (s2)) (begin {}))",
         COMPILER_FILES.join("\n")
     )
 }
@@ -108,6 +109,15 @@ impl Session {
             let expand = s.library_procedure(&["s2", "compiler"], "expand");
             let codegen = s.library_procedure(&["s2", "compiler"], "codegen");
             s.scheme = Some((expand, codegen));
+            // Every compile through the compiler in Scheme (plan/08, C6):
+            // eval and %load-library, which load, imports and library
+            // files go through, become its own.
+            for (name, export) in [("eval", "eval-form"), ("%load-library", "load-library")] {
+                let f = s.library_procedure(&["s2", "compiler"], export);
+                let name = s.heap.intern(name).as_ref().unwrap();
+                let Some(globals::TopBinding::Variable(cell)) = env_of(system).borrow().lookup(name) else { unreachable!() };
+                globals::cell_value(cell).set(f);
+            }
         }
         // The interaction environment: every system binding, imported
         // (globals.rs).
@@ -188,7 +198,11 @@ impl Session {
     /// Compile one top-level form and run it.
     fn eval(&mut self, datum: Value) -> Result<Value, String> {
         let template = self.compile(datum)?;
-        self.vm.run(&mut self.heap, template)
+        let result = self.vm.run(&mut self.heap, template);
+        if result.is_err() {
+            libraries::Libraries::abandon_compiles(&mut self.heap);
+        }
+        result
     }
 
     /// Compile one top-level form, printing its AST and code for
@@ -215,6 +229,7 @@ impl Session {
                 // A compile error is reported as the Rust compiler's is,
                 // without the compiler's own procedures as a backtrace.
                 self.vm.backtrace.clear();
+                libraries::Libraries::abandon_compiles(&mut self.heap);
                 return Err(e);
             }
         };

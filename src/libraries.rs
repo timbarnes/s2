@@ -59,6 +59,10 @@ pub struct Libraries {
     /// While a library file is compiled: every file read, for the compiled
     /// file's staleness check.
     reading: Option<Vec<PathBuf>>,
+    /// While the compiler in Scheme compiles library files, which can
+    /// nest: the interaction environment's `touched` and the `reading` of
+    /// each outer one, waiting.
+    compiling: Vec<(Option<Vec<GcRef>>, Option<Vec<PathBuf>>)>,
 }
 
 impl Libraries {
@@ -68,6 +72,15 @@ impl Libraries {
 
     pub fn insert(&mut self, name: LibraryName, library: Library) {
         self.table.insert(name, library);
+    }
+
+    /// After an error ends a top-level form: what the library files being
+    /// compiled in Scheme left recording, put back as it was before them.
+    pub fn abandon_compiles(heap: &mut Heap) {
+        if let Some((touched, reading)) = heap.libraries.compiling.drain(..).next() {
+            env_of(heap.interaction.unwrap()).borrow_mut().touched = touched;
+            heap.libraries.reading = reading;
+        }
     }
 
     /// Whether the library file `path` has been loaded.
@@ -483,6 +496,12 @@ fn read_library_file(heap: &mut Heap, path: &str) -> Result<Vec<Value>, String> 
     Ok(forms.into_iter().map(|form| relocate_includes(heap, form, &dir)).collect())
 }
 
+/// Templates of top-level forms, as procedures to call in order.
+fn thunks(heap: &mut Heap, templates: Vec<GcRef>) -> Value {
+    let thunks = templates.into_iter().map(|t| heap.closure(t, std::iter::empty())).collect();
+    heap.list(thunks)
+}
+
 /// The compiled code of the library file `path`, from `foo/bar.s2o` next
 /// to `foo/bar.sld` if that is fresh (`fasl::fresh`), or else compiled now
 /// and cached there. Compiling doesn't run anything, so the file's forms
@@ -689,16 +708,59 @@ pub static PRIMITIVES: &[Primitive] = &[
         h.libraries.loaded.insert(PathBuf::from(path));
         Ok(Value::UNSPECIFIED)
     }),
+    // For the compiler in Scheme's load-library: the library file's code
+    // from its compiled file, as a list of procedures to call in order; or
+    // the file of a library it needs loaded first; or #f if there is no
+    // fresh compiled file.
+    prim("%cached-library", 1, Some(1), |h, a| {
+        let path = string_arg(a[0], "%cached-library")?.borrow().to_string();
+        let target = h.interaction.unwrap();
+        Ok(match fasl::read_cached(h, target, &Path::new(&path).with_extension("s2o")) {
+            Ok(Some(templates)) => thunks(h, templates),
+            Ok(None) => Value::FALSE,
+            Err(e) => match h.libraries.pending_load.take() {
+                Some(needed) => h.string(&needed.to_string_lossy()),
+                None => return Err(e.into()),
+            },
+        })
+    }),
+    // Around the compiler in Scheme compiling a library file: record the
+    // interaction environment's changes and the files read, as
+    // compiled_library does...
+    prim("%library-compile-begin", 0, Some(0), |h, _| {
+        let target = h.interaction.unwrap();
+        let touched = env_of(target).borrow_mut().touched.replace(Vec::new());
+        let reading = h.libraries.reading.replace(Vec::new());
+        h.libraries.compiling.push((touched, reading));
+        Ok(Value::UNSPECIFIED)
+    }),
+    // ...then (%library-compile-end path templates-or-#f) writes its
+    // compiled file, given the templates, and puts the outer recording back.
+    prim("%library-compile-end", 2, Some(2), |h, a| {
+        let path = string_arg(a[0], "%library-compile-end")?.borrow().to_string();
+        let target = h.interaction.unwrap();
+        let sources = h.libraries.reading.take().unwrap_or_default();
+        if a[1].is_true() {
+            let templates = list_arg(a[1], "%library-compile-end")?
+                .into_iter()
+                .map(|t| t.as_ref().filter(|r| matches!(r.get().kind, Obj::Template(_))).ok_or_else(|| expected("%library-compile-end", "a template", t)))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Ok(bytes) = fasl::write(h, target, &templates, &sources) {
+                fasl::write_cache(&Path::new(&path).with_extension("s2o"), &bytes);
+            }
+        }
+        let (touched, reading) = h.libraries.compiling.pop().unwrap_or_default();
+        env_of(target).borrow_mut().touched = touched;
+        h.libraries.reading = reading;
+        Ok(Value::UNSPECIFIED)
+    }),
     // For %load-library: the library file's code, compiled, as a list of
     // procedures to call in order; or the file of a library it needs
     // loaded first; or #f if it can't be compiled ahead.
     prim("%compiled-library", 1, Some(1), |h, a| {
         let path = string_arg(a[0], "%compiled-library")?.borrow().to_string();
         Ok(match compiled_library(h, &path) {
-            Ok(templates) => {
-                let thunks = templates.into_iter().map(|t| h.closure(t, std::iter::empty())).collect();
-                h.list(thunks)
-            }
+            Ok(templates) => thunks(h, templates),
             Err(_) => match h.libraries.pending_load.take() {
                 Some(needed) => h.string(&needed.to_string_lossy()),
                 None => Value::FALSE,
