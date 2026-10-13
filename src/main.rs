@@ -64,12 +64,15 @@ const COMPILER_FILES: &[&str] = &[
     include_str!("../scheme/compiler/ast.scm"),
     include_str!("../scheme/compiler/analyze.scm"),
     include_str!("../scheme/compiler/codegen.scm"),
+    include_str!("../scheme/compiler/syntax-rules.scm"),
+    include_str!("../scheme/compiler/libraries.scm"),
+    include_str!("../scheme/compiler/expand.scm"),
 ];
 
 /// `(s2 compiler)`'s source: a `define-library` around `COMPILER_FILES`.
 fn compiler_source() -> String {
     format!(
-        "(define-library (s2 compiler) (export codegen) (import (scheme base) (scheme cxr) (scheme write) (s2)) (begin {}))",
+        "(define-library (s2 compiler) (export expand codegen) (import (scheme base) (scheme cxr) (scheme write) (s2)) (begin {}))",
         COMPILER_FILES.join("\n")
     )
 }
@@ -83,8 +86,9 @@ struct Session {
     vm: vm::Vm,
     dis: bool,
     expand: bool,
-    /// The code generator in Scheme, with `S2_COMPILER=scheme`.
-    codegen: Option<Value>,
+    /// The compiler in Scheme's `expand` and `codegen`, with
+    /// `S2_COMPILER=scheme`.
+    scheme: Option<(Value, Value)>,
 }
 
 impl Session {
@@ -96,12 +100,14 @@ impl Session {
         heap.system = Some(system);
         heap.interaction = Some(system);
         let vm = vm::Vm::new(&mut heap);
-        let mut s = Session { heap, env: system, vm, dis: false, expand: false, codegen: None };
+        let mut s = Session { heap, env: system, vm, dis: false, expand: false, scheme: None };
         s.load_image(CORE_SCM, "s2-core.s2o");
         libraries::register_standard_libraries(&mut s.heap, system);
         if compile::compiler() == compile::Compiler::Scheme {
             s.load_image(&compiler_source(), "s2-compiler.s2o");
-            s.codegen = Some(s.library_procedure(&["s2", "compiler"], "codegen"));
+            let expand = s.library_procedure(&["s2", "compiler"], "expand");
+            let codegen = s.library_procedure(&["s2", "compiler"], "codegen");
+            s.scheme = Some((expand, codegen));
         }
         // The interaction environment: every system binding, imported
         // (globals.rs).
@@ -181,8 +187,41 @@ impl Session {
 
     /// Compile one top-level form and run it.
     fn eval(&mut self, datum: Value) -> Result<Value, String> {
-        let ast = self.expand(datum)?;
-        self.run(&ast)
+        let template = self.compile(datum)?;
+        self.vm.run(&mut self.heap, template)
+    }
+
+    /// Compile one top-level form, printing its AST and code for
+    /// `--expand` and `--dis`: with the compiler in Scheme if `S2_COMPILER`
+    /// chose it, else in Rust.
+    fn compile(&mut self, datum: Value) -> Result<GcRef, String> {
+        let Some((expand, codegen)) = self.scheme else {
+            let ast = self.expand(datum)?;
+            return self.generate(&ast);
+        };
+        let env = Value::obj(self.env);
+        // Each call holds its arguments, so they survive its collections.
+        let compiled = self.vm.call(&mut self.heap, expand, &[datum, env]).and_then(|ast| {
+            if self.expand {
+                let shown = compile::data::datum_to_expr(ast).map(|e| compile::ast::show(&e))?;
+                io::write_stdout(&self.heap, &format!("{}\n", shown));
+            }
+            self.vm.call(&mut self.heap, codegen, &[ast])
+        });
+        let template = match compiled {
+            Ok(t) if matches!(t.as_obj().map(|o| &o.kind), Some(heap::Obj::Template(_))) => t.as_ref().unwrap(),
+            Ok(t) => return Err(format!("the compiler in Scheme returned {}", printer::print_value(t))),
+            Err(e) => {
+                // A compile error is reported as the Rust compiler's is,
+                // without the compiler's own procedures as a backtrace.
+                self.vm.backtrace.clear();
+                return Err(e);
+            }
+        };
+        if self.dis {
+            io::write_stdout(&self.heap, &compile::disasm::disassemble(template));
+        }
+        Ok(template)
     }
 
     /// Expand one top-level form. If it imports a library whose file
@@ -205,31 +244,13 @@ impl Session {
         }
     }
 
-    fn run(&mut self, ast: &compile::ast::Expr) -> Result<Value, String> {
-        let template = self.generate(ast)?;
-        self.vm.run(&mut self.heap, template)
-    }
-
-    /// Generate a form's code, printing its AST and code for `--expand`
-    /// and `--dis`: with the Scheme code generator if `S2_COMPILER` chose
-    /// it, else in Rust.
+    /// Generate a form's code in Rust, printing its AST and code for
+    /// `--expand` and `--dis`.
     fn generate(&mut self, ast: &compile::ast::Expr) -> Result<GcRef, String> {
         if self.expand {
             io::write_stdout(&self.heap, &format!("{}\n", compile::ast::show(ast)));
         }
-        let template = match self.codegen {
-            Some(codegen) => {
-                // The AST's data form holds everything the AST refers to,
-                // so the call keeps it alive through any collection.
-                let datum = compile::data::expr_to_datum(&mut self.heap, ast);
-                let t = self.vm.call(&mut self.heap, codegen, &[datum])?;
-                match t.as_obj().map(|o| &o.kind) {
-                    Some(heap::Obj::Template(_)) => t.as_ref().unwrap(),
-                    _ => return Err(format!("the Scheme code generator returned {}", printer::print_value(t))),
-                }
-            }
-            None => compile::generate(&mut self.heap, ast),
-        };
+        let template = compile::generate(&mut self.heap, ast);
         if self.dis {
             io::write_stdout(&self.heap, &compile::disasm::disassemble(template));
         }
@@ -242,7 +263,11 @@ impl Session {
         let name = self.heap.string(&path.to_string_lossy());
         let form = self.heap.list(vec![f, name]);
         let saved = std::mem::replace(&mut self.env, self.heap.interaction.unwrap());
+        // Not printed by --expand and --dis: the form is s2's, not the
+        // program's (and the compiler in Scheme loads libraries without it).
+        let flags = (std::mem::take(&mut self.expand), std::mem::take(&mut self.dis));
         let result = self.eval(form);
+        (self.expand, self.dis) = flags;
         self.env = saved;
         result
     }
@@ -368,12 +393,8 @@ impl Session {
                 Err(ParseError::Eof) => break fasl::write(&self.heap, self.env, &templates, &[file.into()]),
                 Err(ParseError::Syntax(msg)) => break Err(msg),
             };
-            match self.expand(datum) {
-                Ok(ast) => {
-                    let t = match self.generate(&ast) {
-                        Ok(t) => t,
-                        Err(e) => break Err(e),
-                    };
+            match self.compile(datum) {
+                Ok(t) => {
                     self.heap.pinned.push(Value::obj(t));
                     templates.push(t);
                     // A library the program defines is registered now, so the
@@ -915,11 +936,18 @@ mod tests {
     fn deep_expansions() {
         // A 1,000-argument or nests 1,000 macro uses, and as many lets: on
         // a default 2MB thread stack, a debug build overflowed at about 150.
+        // Unstressed, even under S2_GC_STRESS: with the Scheme front end,
+        // collecting at every safepoint over these expansions takes hours.
+        let unstressed = || {
+            let mut s = Session::new();
+            s.heap.stress = false;
+            s
+        };
         let src = format!("(or {} 1)", "#f ".repeat(1000));
-        check(&src, &["1"]);
+        assert_eq!(run_in(&mut unstressed(), &src), ["1"]);
         // A macro that expands forever is an error, not a crash.
-        check("(define-syntax forever (syntax-rules () ((_ x) (list (forever x))))) (forever 1)",
-              &["forever", "error: macro uses nested more than 10000 deep: (forever 1)"]);
+        assert_eq!(run_in(&mut unstressed(), "(define-syntax forever (syntax-rules () ((_ x) (list (forever x))))) (forever 1)"),
+                   ["forever", "error: macro uses nested more than 10000 deep: (forever 1)"]);
     }
 
     #[test]

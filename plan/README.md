@@ -7,7 +7,7 @@ paper, measure where possible, then implement in small steps.
 For using s2, see the [user guide](https://timbarnes.github.io/s2/) (source
 in `docs/`).
 
-**Status:** P0-P7 done 2026-10-10, P8-P12 2026-10-11 ([P0](phases/P0.md), [P1](phases/P1.md), [P2](phases/P2.md), [P3](phases/P3.md), [P4](phases/P4.md), [P5](phases/P5.md), [P6](phases/P6.md), [P7](phases/P7.md), [P8](phases/P8.md), [P9](phases/P9.md), [P10](phases/P10.md), [P11](phases/P11.md), [P12](phases/P12.md)). P13, planned in [08](08-compiler-in-scheme.md), is in progress: [P13.0 and P13.1](phases/P13.md) done 2026-10-12.
+**Status:** P0-P7 done 2026-10-10, P8-P12 2026-10-11 ([P0](phases/P0.md), [P1](phases/P1.md), [P2](phases/P2.md), [P3](phases/P3.md), [P4](phases/P4.md), [P5](phases/P5.md), [P6](phases/P6.md), [P7](phases/P7.md), [P8](phases/P8.md), [P9](phases/P9.md), [P10](phases/P10.md), [P11](phases/P11.md), [P12](phases/P12.md)). P13, planned in [08](08-compiler-in-scheme.md), is in progress: [P13.0, P13.1 and P13.3](phases/P13.md) done 2026-10-12.
 
 ## Goals
 

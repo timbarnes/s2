@@ -4,6 +4,7 @@ pub mod analyze;
 pub mod ast;
 pub mod codegen;
 pub mod data;
+pub mod prims;
 pub mod disasm;
 pub mod expand;
 pub mod syntax_rules;

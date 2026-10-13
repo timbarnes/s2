@@ -70,6 +70,11 @@ impl Libraries {
         self.table.insert(name, library);
     }
 
+    /// Whether the library file `path` has been loaded.
+    pub fn is_loaded(&self, path: &Path) -> bool {
+        self.loaded.contains(path)
+    }
+
     /// The environments of the libraries `define-library` made.
     pub fn environments(&self) -> impl Iterator<Item = GcRef> + '_ {
         self.table.values().filter_map(|l| l.env)
@@ -463,7 +468,7 @@ fn search_path() -> Vec<PathBuf> {
 
 /// The first file on the search path that could define library `name`:
 /// `(foo bar)` is `foo/bar.sld`.
-fn find_library_file(name: &LibraryName) -> Option<PathBuf> {
+pub fn find_library_file(name: &LibraryName) -> Option<PathBuf> {
     let mut file: PathBuf = name.iter().collect();
     file.set_extension("sld");
     search_path().into_iter().map(|dir| dir.join(&file)).find(|path| path.is_file())

@@ -205,6 +205,14 @@ environment. Scheme code matches and instantiates them.
   need to store procedures (templates and their free variables). That is
   left for after P13.
 
+**Changed in P13.3: macros stay Rust objects.** The Scheme expander
+reads a macro's parts with `%macro-parts`, matches and instantiates them
+in Scheme, and makes macros with `%make-macro`. The `SyntaxRules` struct
+holds the same data as before. While both front ends are selectable they
+must share macros, in environments and in compiled files, and this lets
+them do that without changing the fasl format. Revisit with procedural
+macros, or when the Rust front end goes (P13.6).
+
 ### C5. Bootstrapping
 
 The compiler in Scheme must be compiled by something before it can run.
@@ -328,8 +336,8 @@ chibi's suite at 1154.
 | P13.0 | Groundwork | Both compilers selectable; the diff harness runs |
 | P13.1 | Codegen and analysis in Scheme | Identical `--dis` over the corpus |
 | P13.2 | (folded into P13.1) | |
-| P13.3 | The front end in Scheme: `syntax-rules`, the expander, library declarations | Identical `--expand` and `--dis`; `pending_load` gone |
-| P13.4 | The driver: every compile through Scheme; `eval` and loading in Scheme | All tests with `S2_COMPILER=scheme` |
+| P13.3 | The front end in Scheme: `syntax-rules`, the expander, library declarations | Identical `--expand` and `--dis` |
+| P13.4 | The driver: every compile through Scheme; `eval` and loading in Scheme; `pending_load` gone | All tests with `S2_COMPILER=scheme` |
 | P13.5 | Self-compilation and the image | The fixed point |
 | P13.6 | Measurement and the Rust compiler's fate | 07's tables, compile times |
 
@@ -378,6 +386,15 @@ to be thrown away a sub-phase later, and analysis is under 200 lines.
 
 ### P13.3. The front end in Scheme
 
+**Changed in P13.3:**
+
+- Macros stay Rust objects (C4 changed), so step 5 goes.
+- Step 2's separate test of the matcher was skipped. The oracle covers
+  every macro use in the corpus, and it passed first time.
+- `pending_load` stays until P13.4. Library files and `eval` still
+  compile inside a primitive, with the Rust front end, which needs it.
+  The Scheme front end calls `%load-library` directly.
+
 The largest sub-phase, built in steps, each tested before the switch:
 
 1. **Identifiers and aliases** through primitives (C3). `strip` and
@@ -402,6 +419,7 @@ The largest sub-phase, built in steps, each tested before the switch:
 
 - Every caller of the compiler goes through Scheme (C6): the REPL, `-e`,
   `-f`, programs, `--compile`, `load`, library files and `eval`.
+- `pending_load` and `%load-then-eval` go (moved from P13.3).
 - Compile errors as Scheme errors (C9). Rust callers pin what they hold
   across a compile (constraint 5).
 - **Exit:** all tests with `S2_COMPILER=scheme`. The GC stress runs
