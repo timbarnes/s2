@@ -49,7 +49,7 @@ use crate::compile::expand::CORE_FORMS;
 use crate::compile::syntax_rules::SyntaxRules;
 use crate::globals::{Env, TopBinding, env_of};
 use crate::heap::{GcRef, Heap, Obj};
-use crate::libraries::{LibraryName, require_library};
+use crate::libraries::{LibraryName, format_name, library_to_load};
 use crate::printer::print_value;
 use crate::value::Value;
 use crate::vm::op::Test;
@@ -716,19 +716,14 @@ fn fresh(bytes: &[u8], written: SystemTime) -> bool {
 
 /// Load the compiled file at `path` into `target`, if it is fresh. None if
 /// it is missing, stale or unreadable, for the caller to compile its
-/// sources instead. An error only if it needs a library loaded first
-/// (`pending_load` is set).
-pub fn read_cached(heap: &mut Heap, target: GcRef, path: &Path) -> Result<Option<Vec<GcRef>>, String> {
-    let Ok(bytes) = std::fs::read(path) else { return Ok(None) };
-    let Ok(written) = std::fs::metadata(path).and_then(|m| m.modified()) else { return Ok(None) };
+/// sources instead.
+pub fn read_cached(heap: &mut Heap, target: GcRef, path: &Path) -> Option<Loaded> {
+    let bytes = std::fs::read(path).ok()?;
+    let written = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     if !fresh(&bytes, written) {
-        return Ok(None);
+        return None;
     }
-    match read(heap, target, &bytes) {
-        Ok(templates) => Ok(Some(templates)),
-        Err(e) if heap.libraries.pending_load.is_some() => Err(e),
-        Err(_) => Ok(None),
-    }
+    read(heap, target, &bytes).ok()
 }
 
 /// Write a cache file, best effort: whole, then renamed into place, so
@@ -740,11 +735,20 @@ pub fn write_cache(path: &Path, bytes: &[u8]) {
     }
 }
 
+/// What reading a compiled file gives.
+#[derive(Debug)]
+pub enum Loaded {
+    /// Its templates, to be run in order.
+    Code(Vec<GcRef>),
+    /// Nothing yet: a library it needs isn't registered. This is the file
+    /// that defines it, for the caller to load before reading again.
+    Needs(PathBuf),
+}
+
 /// Load a compiled file into `target`: make its environments' bindings,
-/// and return its templates, to be run in order. If a library it needs
-/// isn't registered, the error leaves `pending_load` set, as the expander
-/// does, for the caller to load the library and try again.
-pub fn read(heap: &mut Heap, target: GcRef, bytes: &[u8]) -> Result<Vec<GcRef>, String> {
+/// and return its templates; or, if a library it needs isn't registered,
+/// the file to load first.
+pub fn read(heap: &mut Heap, target: GcRef, bytes: &[u8]) -> Result<Loaded, String> {
     // Not changes a program being compiled makes, if one is recording.
     let outer = env_of(target).borrow_mut().touched.take();
     let result = read_unit(heap, target, bytes);
@@ -752,13 +756,15 @@ pub fn read(heap: &mut Heap, target: GcRef, bytes: &[u8]) -> Result<Vec<GcRef>, 
     result
 }
 
-fn read_unit(heap: &mut Heap, target: GcRef, bytes: &[u8]) -> Result<Vec<GcRef>, String> {
+fn read_unit(heap: &mut Heap, target: GcRef, bytes: &[u8]) -> Result<Loaded, String> {
     let mut r = Reader { bytes, at: 0 };
     r.header()?;
     let needs = r.small::<usize>()?;
     for _ in 0..needs {
         let name = r.name()?;
-        require_library(heap, &name)?;
+        if let Some(path) = library_to_load(heap, &name, "load")? {
+            return Ok(Loaded::Needs(path));
+        }
     }
     let count: usize = r.small()?;
     let mut objects: Vec<Value> = Vec::with_capacity(count.min(1 << 20));
@@ -816,8 +822,8 @@ fn read_unit(heap: &mut Heap, target: GcRef, bytes: &[u8]) -> Result<Vec<GcRef>,
                 SYSTEM => heap.system.unwrap(),
                 LIBRARY => {
                     let name = r.name()?;
-                    require_library(heap, &name)?;
-                    heap.libraries.get(&name).and_then(|l| l.env).ok_or(TRUNCATED)?
+                    let library = heap.libraries.get(&name).ok_or_else(|| format!("load: library {} isn't loaded", format_name(&name)))?;
+                    library.env.ok_or(TRUNCATED)?
                 }
                 NEW => {
                     let env = heap.environment(Env::empty(r.u8()? != 0));
@@ -879,7 +885,7 @@ fn read_unit(heap: &mut Heap, target: GcRef, bytes: &[u8]) -> Result<Vec<GcRef>,
         }
     }
     let n: usize = r.small()?;
-    (0..n).map(|_| gc(obj(&objects, r.uint()?)?)).collect()
+    (0..n).map(|_| gc(obj(&objects, r.uint()?)?)).collect::<Result<_, _>>().map(Loaded::Code)
 }
 
 fn val(r: &mut Reader, objects: &[Value]) -> Result<Value, String> {

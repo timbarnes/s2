@@ -109,10 +109,7 @@ impl Session {
             // instead of the cached one.
             match std::env::var_os("S2_COMPILER_IMAGE") {
                 Some(path) => {
-                    let loaded = std::fs::read(&path)
-                        .map_err(|e| e.to_string())
-                        .and_then(|bytes| fasl::read(&mut s.heap, system, &bytes))
-                        .and_then(|templates| s.run_templates(&templates));
+                    let loaded = std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| s.run_image(&bytes));
                     if let Err(e) = loaded {
                         panic!("{}: {}", path.to_string_lossy(), e);
                     }
@@ -152,10 +149,10 @@ impl Session {
     fn load_image(&mut self, source: &str, image_name: &str) {
         let system = self.heap.system.unwrap();
         let image = std::env::current_exe().map(|exe| exe.with_file_name(image_name)).ok();
-        let cached = image.as_deref().and_then(|p| fasl::read_cached(&mut self.heap, system, p).ok().flatten());
+        let cached = image.as_deref().and_then(|p| fasl::read_cached(&mut self.heap, system, p));
         let result = match cached {
-            Some(templates) => self.run_templates(&templates),
-            None => self.build_image(source).map(|bytes| {
+            Some(fasl::Loaded::Code(templates)) => self.run_templates(&templates),
+            _ => self.build_image(source).map(|bytes| {
                 if let Some(image) = image {
                     fasl::write_cache(&image, &bytes);
                 }
@@ -191,6 +188,44 @@ impl Session {
         bytes
     }
 
+    /// `scheme/core.scm`'s image, compiled by the compiler selected. The
+    /// system environment already has core's bindings, so it is compiled
+    /// for a new one, made as `new` makes the system environment, standing
+    /// in as the system environment while it compiles. The compiler's own
+    /// code holds the cells it uses, so it runs on unaffected. Nothing is
+    /// run: core's macros are all syntax-rules.
+    fn core_image(&mut self) -> Result<Vec<u8>, String> {
+        let core = Env::with_core_forms(&mut self.heap);
+        let target = self.heap.environment(core);
+        builtins::install(&mut self.heap, &mut env_of(target).borrow_mut());
+        let system = self.heap.system.replace(target);
+        let env = std::mem::replace(&mut self.env, target);
+        env_of(target).borrow_mut().touched = Some(Vec::new());
+        let pinned = self.heap.pinned.len();
+        // The real system environment waits through the compile's collections.
+        self.heap.pinned.extend([Value::obj(target), Value::obj(system.unwrap())]);
+        let mut templates = Vec::new();
+        let mut port = io::new_string_port_input(CORE_SCM);
+        let mut result = Ok(());
+        while let Ok(datum) = parse(&mut self.heap, &mut port) {
+            match self.compile(datum) {
+                Ok(t) => {
+                    templates.push(t);
+                    self.heap.pinned.push(Value::obj(t));
+                }
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
+            }
+        }
+        let bytes = result.and_then(|()| fasl::write(&self.heap, target, &templates, &[]));
+        self.heap.pinned.truncate(pinned);
+        self.heap.system = system;
+        self.env = env;
+        bytes
+    }
+
     /// `(s2 compiler)`'s image, compiled by the compiler selected: for
     /// self-compilation (plan/08, P13.5).
     fn compiler_image(&mut self) -> Result<Vec<u8>, String> {
@@ -208,6 +243,16 @@ impl Session {
         match exports.iter().find(|&&(n, _)| n == name) {
             Some(&(_, globals::TopBinding::Variable(cell))) => globals::cell_value(cell).get(),
             _ => panic!("{:?} doesn't export {}", library, printer::print_value(Value::obj(name))),
+        }
+    }
+
+    /// Load and run an image built into the system environment. It needs
+    /// only standard libraries.
+    fn run_image(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let system = self.heap.system.unwrap();
+        match fasl::read(&mut self.heap, system, bytes)? {
+            fasl::Loaded::Code(templates) => self.run_templates(&templates),
+            fasl::Loaded::Needs(path) => Err(format!("the image needs {}", path.display())),
         }
     }
 
@@ -407,12 +452,9 @@ impl Session {
     /// first, then run its forms' code in order.
     fn run_compiled(&mut self, bytes: &[u8]) -> Result<(), String> {
         let templates = loop {
-            match fasl::read(&mut self.heap, self.env, bytes) {
-                Ok(templates) => break templates,
-                Err(e) => match self.heap.libraries.pending_load.take() {
-                    Some(path) => self.load_library(&path).map(|_| ())?,
-                    None => return Err(e),
-                },
+            match fasl::read(&mut self.heap, self.env, bytes)? {
+                fasl::Loaded::Code(templates) => break templates,
+                fasl::Loaded::Needs(path) => self.load_library(&path).map(|_| ())?,
             }
         };
         self.run_templates(&templates)
@@ -531,8 +573,9 @@ fn run_main() {
         },
         [flag, file] if flag == "--compile" => compile_to(&mut session, file, &Path::new(file).with_extension("s2o")),
         [flag, file, o, out] if flag == "--compile" && o == "-o" => compile_to(&mut session, file, Path::new(out)),
-        [flag, out] if flag == "--compiler-image" => {
-            match session.compiler_image().and_then(|bytes| std::fs::write(out, bytes).map_err(|e| format!("{}: {}", out, e))) {
+        [flag, out] if flag == "--core-image" || flag == "--compiler-image" => {
+            let image = if flag == "--core-image" { session.core_image() } else { session.compiler_image() };
+            match image.and_then(|bytes| std::fs::write(out, bytes).map_err(|e| format!("{}: {}", out, e))) {
                 Ok(()) => true,
                 Err(msg) => {
                     session.report(&msg);

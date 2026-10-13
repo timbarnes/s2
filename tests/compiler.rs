@@ -182,24 +182,33 @@ fn compiled_files_are_reproducible() {
 
 /// Self-compilation (P13.5): the compiler compiled by the Rust compiler
 /// (stage 1) compiles itself (stage 2), and that compiles itself again
-/// (stage 3). All three are the same bytes.
+/// (stage 3). All three are the same bytes. So is `core.scm`'s image,
+/// compiled by stage 1 and by the Rust compiler.
 #[test]
 fn the_scheme_compiler_compiles_itself_to_a_fixed_point() {
     let dir = std::env::temp_dir();
-    let stage = |n: u32| dir.join(format!("s2-stage-{}-{}.s2o", n, std::process::id()));
-    for n in 1..=3 {
+    let file = |name: &str| dir.join(format!("s2-{}-{}.s2o", name, std::process::id()));
+    let build = |flag: &str, out: &str, compiler: &str, image: Option<&str>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_s2"));
-        command.arg("--compiler-image").arg(stage(n));
-        if n == 1 {
-            command.env("S2_COMPILER", "rust");
-        } else {
-            command.env("S2_COMPILER", "scheme").env("S2_COMPILER_IMAGE", stage(n - 1));
+        command.arg(flag).arg(file(out)).env("S2_COMPILER", compiler);
+        if let Some(image) = image {
+            command.env("S2_COMPILER_IMAGE", file(image));
         }
         let result = command.output().unwrap();
-        assert!(result.status.success(), "stage {}: {}", n, String::from_utf8_lossy(&result.stderr));
-    }
-    let stages: Vec<Vec<u8>> = (1..=3).map(|n| std::fs::read(stage(n)).unwrap()).collect();
-    (1..=3).for_each(|n| std::fs::remove_file(stage(n)).unwrap());
-    assert!(stages[0] == stages[1], "stage 2 differs from stage 1");
-    assert!(stages[1] == stages[2], "stage 3 differs from stage 2");
+        assert!(result.status.success(), "{}: {}", out, String::from_utf8_lossy(&result.stderr));
+        let bytes = std::fs::read(file(out)).unwrap();
+        std::fs::remove_file(file(out)).ok();
+        bytes
+    };
+    let stage1 = build("--compiler-image", "stage-1", "rust", None);
+    std::fs::write(file("stage-1-image"), &stage1).unwrap();
+    let stage2 = build("--compiler-image", "stage-2", "scheme", Some("stage-1-image"));
+    std::fs::write(file("stage-2-image"), &stage2).unwrap();
+    let stage3 = build("--compiler-image", "stage-3", "scheme", Some("stage-2-image"));
+    let core_rust = build("--core-image", "core-rust", "rust", None);
+    let core_scheme = build("--core-image", "core-scheme", "scheme", Some("stage-1-image"));
+    ["stage-1-image", "stage-2-image"].iter().for_each(|f| std::fs::remove_file(file(f)).unwrap());
+    assert!(stage1 == stage2, "stage 2 differs from stage 1");
+    assert!(stage2 == stage3, "stage 3 differs from stage 2");
+    assert!(core_rust == core_scheme, "core.scm compiles differently");
 }

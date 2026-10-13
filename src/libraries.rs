@@ -287,30 +287,31 @@ pub fn format_name(name: &LibraryName) -> String {
     format!("({})", name.join(" "))
 }
 
+/// None if library `name` is registered; if it isn't, the file to load
+/// first, or an error if there is none to load.
+pub fn library_to_load(heap: &Heap, name: &LibraryName, who: &str) -> Result<Option<PathBuf>, String> {
+    if heap.libraries.get(name).is_some() {
+        return Ok(None);
+    }
+    match find_library_file(name) {
+        Some(path) if heap.libraries.loaded.contains(&path) => {
+            Err(format!("{}: {} does not define {}", who, path.display(), format_name(name)))
+        }
+        Some(path) => Ok(Some(path)),
+        None => Err(format!("{}: unknown library {}", who, format_name(name))),
+    }
+}
+
 /// The library named `name`, loading its file if it has one that hasn't
 /// been loaded: in that case the file is recorded in `pending_load` and the
 /// result is an error, for the caller to load the file and try again.
 fn find_library<'a>(heap: &'a mut Heap, name: &LibraryName, who: &str) -> Result<&'a Library, String> {
-    if heap.libraries.get(name).is_none() {
-        match find_library_file(name) {
-            Some(path) if heap.libraries.loaded.contains(&path) => {
-                return Err(format!("{}: {} does not define {}", who, path.display(), format_name(name)));
-            }
-            Some(path) => {
-                let message = format!("{}: loading {}", who, path.display());
-                heap.libraries.pending_load = Some(path);
-                return Err(message);
-            }
-            None => return Err(format!("{}: unknown library {}", who, format_name(name))),
-        }
+    if let Some(path) = library_to_load(heap, name, who)? {
+        let message = format!("{}: loading {}", who, path.display());
+        heap.libraries.pending_load = Some(path);
+        return Err(message);
     }
     Ok(heap.libraries.get(name).unwrap())
-}
-
-/// Check that library `name` is registered. If it isn't but its file can
-/// be found, the error leaves `pending_load` set, as for an import.
-pub fn require_library(heap: &mut Heap, name: &LibraryName) -> Result<(), String> {
-    find_library(heap, name, "load").map(|_| ())
 }
 
 /// The (name, binding) pairs an import set denotes (R7RS §5.2): a library
@@ -509,8 +510,13 @@ fn thunks(heap: &mut Heap, templates: Vec<GcRef>) -> Value {
 fn compiled_library(heap: &mut Heap, path: &str) -> Result<Vec<GcRef>, String> {
     let target = heap.interaction.unwrap();
     let cache = Path::new(path).with_extension("s2o");
-    if let Some(templates) = fasl::read_cached(heap, target, &cache)? {
-        return Ok(templates);
+    match fasl::read_cached(heap, target, &cache) {
+        Some(fasl::Loaded::Code(templates)) => return Ok(templates),
+        Some(fasl::Loaded::Needs(path)) => {
+            heap.libraries.pending_load = Some(path);
+            return Err("load: a library is needed first".into());
+        }
+        None => {}
     }
     heap.libraries.reading = Some(Vec::new());
     // A program being compiled may be recording its own changes to the
@@ -716,12 +722,9 @@ pub static PRIMITIVES: &[Primitive] = &[
         let path = string_arg(a[0], "%cached-library")?.borrow().to_string();
         let target = h.interaction.unwrap();
         Ok(match fasl::read_cached(h, target, &Path::new(&path).with_extension("s2o")) {
-            Ok(Some(templates)) => thunks(h, templates),
-            Ok(None) => Value::FALSE,
-            Err(e) => match h.libraries.pending_load.take() {
-                Some(needed) => h.string(&needed.to_string_lossy()),
-                None => return Err(e.into()),
-            },
+            Some(fasl::Loaded::Code(templates)) => thunks(h, templates),
+            Some(fasl::Loaded::Needs(needed)) => h.string(&needed.to_string_lossy()),
+            None => Value::FALSE,
         })
     }),
     // Around the compiler in Scheme compiling a library file: record the
