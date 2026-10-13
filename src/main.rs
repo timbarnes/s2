@@ -105,7 +105,20 @@ impl Session {
         s.load_image(CORE_SCM, "s2-core.s2o");
         libraries::register_standard_libraries(&mut s.heap, system);
         if compile::compiler() == compile::Compiler::Scheme {
-            s.load_image(&compiler_source(), "s2-compiler.s2o");
+            // S2_COMPILER_IMAGE names an image to load the compiler from,
+            // instead of the cached one.
+            match std::env::var_os("S2_COMPILER_IMAGE") {
+                Some(path) => {
+                    let loaded = std::fs::read(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| fasl::read(&mut s.heap, system, &bytes))
+                        .and_then(|templates| s.run_templates(&templates));
+                    if let Err(e) = loaded {
+                        panic!("{}: {}", path.to_string_lossy(), e);
+                    }
+                }
+                None => s.load_image(&compiler_source(), "s2-compiler.s2o"),
+            }
             let expand = s.library_procedure(&["s2", "compiler"], "expand");
             let codegen = s.library_procedure(&["s2", "compiler"], "codegen");
             s.scheme = Some((expand, codegen));
@@ -142,36 +155,49 @@ impl Session {
         let cached = image.as_deref().and_then(|p| fasl::read_cached(&mut self.heap, system, p).ok().flatten());
         let result = match cached {
             Some(templates) => self.run_templates(&templates),
-            None => {
-                env_of(system).borrow_mut().touched = Some(Vec::new());
-                let mut templates = Vec::new();
-                let mut port = io::new_string_port_input(source);
-                let pinned = self.heap.pinned.len();
-                let mut result = Ok(());
-                while let Ok(datum) = parse(&mut self.heap, &mut port) {
-                    result = self.expand(datum).and_then(|ast| {
-                        let t = compile::generate(&mut self.heap, &ast);
-                        templates.push(t);
-                        self.heap.pinned.push(Value::obj(t));
-                        self.vm.run(&mut self.heap, t).map(|_| ())
-                    });
-                    if result.is_err() {
-                        break;
-                    }
-                }
-                if let (Ok(()), Some(image)) = (&result, image)
-                    && let Ok(bytes) = fasl::write(&self.heap, system, &templates, &[])
-                {
+            None => self.build_image(source).map(|bytes| {
+                if let Some(image) = image {
                     fasl::write_cache(&image, &bytes);
                 }
-                self.heap.pinned.truncate(pinned);
-                env_of(system).borrow_mut().touched = None;
-                result
-            }
+            }),
         };
         if let Err(e) = result {
             panic!("{}: {}", image_name, e);
         }
+    }
+
+    /// Compile and run `source` form by form in the system environment,
+    /// which must be `self.env`, with the compiler selected; its image.
+    fn build_image(&mut self, source: &str) -> Result<Vec<u8>, String> {
+        let system = self.heap.system.unwrap();
+        env_of(system).borrow_mut().touched = Some(Vec::new());
+        let mut templates = Vec::new();
+        let mut port = io::new_string_port_input(source);
+        let pinned = self.heap.pinned.len();
+        let mut result = Ok(());
+        while let Ok(datum) = parse(&mut self.heap, &mut port) {
+            result = self.compile(datum).and_then(|t| {
+                templates.push(t);
+                self.heap.pinned.push(Value::obj(t));
+                self.vm.run(&mut self.heap, t).map(|_| ())
+            });
+            if result.is_err() {
+                break;
+            }
+        }
+        let bytes = result.and_then(|()| fasl::write(&self.heap, system, &templates, &[]));
+        self.heap.pinned.truncate(pinned);
+        env_of(system).borrow_mut().touched = None;
+        bytes
+    }
+
+    /// `(s2 compiler)`'s image, compiled by the compiler selected: for
+    /// self-compilation (plan/08, P13.5).
+    fn compiler_image(&mut self) -> Result<Vec<u8>, String> {
+        let saved = std::mem::replace(&mut self.env, self.heap.system.unwrap());
+        let bytes = self.build_image(&compiler_source());
+        self.env = saved;
+        bytes
     }
 
     /// The procedure the library `library` exports as `name`.
@@ -505,6 +531,15 @@ fn run_main() {
         },
         [flag, file] if flag == "--compile" => compile_to(&mut session, file, &Path::new(file).with_extension("s2o")),
         [flag, file, o, out] if flag == "--compile" && o == "-o" => compile_to(&mut session, file, Path::new(out)),
+        [flag, out] if flag == "--compiler-image" => {
+            match session.compiler_image().and_then(|bytes| std::fs::write(out, bytes).map_err(|e| format!("{}: {}", out, e))) {
+                Ok(()) => true,
+                Err(msg) => {
+                    session.report(&msg);
+                    false
+                }
+            }
+        }
         [file, ..] if !file.starts_with('-') => session.run_program(&args),
         _ => usage(),
     };

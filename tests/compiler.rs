@@ -179,3 +179,27 @@ fn compiled_files_are_reproducible() {
         assert!(plain == stressed, "{}: compiling twice gave different bytes", name);
     }
 }
+
+/// Self-compilation (P13.5): the compiler compiled by the Rust compiler
+/// (stage 1) compiles itself (stage 2), and that compiles itself again
+/// (stage 3). All three are the same bytes.
+#[test]
+fn the_scheme_compiler_compiles_itself_to_a_fixed_point() {
+    let dir = std::env::temp_dir();
+    let stage = |n: u32| dir.join(format!("s2-stage-{}-{}.s2o", n, std::process::id()));
+    for n in 1..=3 {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_s2"));
+        command.arg("--compiler-image").arg(stage(n));
+        if n == 1 {
+            command.env("S2_COMPILER", "rust");
+        } else {
+            command.env("S2_COMPILER", "scheme").env("S2_COMPILER_IMAGE", stage(n - 1));
+        }
+        let result = command.output().unwrap();
+        assert!(result.status.success(), "stage {}: {}", n, String::from_utf8_lossy(&result.stderr));
+    }
+    let stages: Vec<Vec<u8>> = (1..=3).map(|n| std::fs::read(stage(n)).unwrap()).collect();
+    (1..=3).for_each(|n| std::fs::remove_file(stage(n)).unwrap());
+    assert!(stages[0] == stages[1], "stage 2 differs from stage 1");
+    assert!(stages[1] == stages[2], "stage 3 differs from stage 2");
+}
