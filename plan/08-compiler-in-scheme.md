@@ -508,3 +508,12 @@ The largest sub-phase, built in steps, each tested before the switch:
   Scheme (C6).
 - **Moving the reader or builtins into Scheme.** 06 §2: they stay in
   Rust, being faster there.
+
+## Outcome (P13.6)
+
+The measurements are in [P13.md](phases/P13.md#p136-measurement-and-the-rust-compilers-fate):
+compiling in Scheme is 8-10 times slower, while startup, cached loads
+and run-time are unchanged. **s2 is frozen with both compilers**
+(tag `s2-final`), so the two can be studied side by side. Development
+continues in **s3**, a clone of s2 that removes the Rust compiler and
+commits its boot images (C5 b).
